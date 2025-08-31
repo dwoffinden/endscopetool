@@ -2,7 +2,7 @@
 # Python implementation of the endscopetool (sic!) Android application used for the Vitcoco ear wax remover camera thingy.
 # CC-0 / Public Domain
 # (0) 2023 Raphael Wimmer
-# v0.01
+# v0.1.0
 # reverse-engineered using a packet capture log - this means that I have no idea what all those magic numbers mean
 # and whether there are further features that might be supported by the hardware
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
@@ -28,7 +28,8 @@ sock_meta.bind(('0.0.0.0', source_port_meta))
 
 sock_vid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock_vid.bind(('0.0.0.0', source_port_vid))
-sock_vid.settimeout(5.0) 
+sock_vid.settimeout(5.0)
+brightness = 100
 
 
 try:
@@ -57,19 +58,25 @@ try:
     sock_vid.sendto(data, (target_ip, target_port_vid))
     sock_vid.sendto(data, (target_ip, target_port_vid))
 
-    # no idea what this command does
+    # set led brightness to 100%
     data = "type=1003&value=100\x0a".encode()
+    # start with led off
+    #data = "type=1003&value=0\x0a".encode()
     sock_meta.sendto(data, (target_ip, target_port_meta))
     reply, addr = sock_meta.recvfrom(buffer_size)
-    received_data = reply.decode()
-
-    print("Received data:", received_data)
+    # handle UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 21: invalid start byte gracefully
+    try:
+        received_data = reply.decode()
+        print("Received data:", received_data)
+    except UnicodeDecodeError:
+        print ("UnicodeDecodeError, can be ignored")
     #print("Sender address:", addr)
 
     cv2.namedWindow("Video Stream", cv2.WINDOW_NORMAL)
     #cv2.setWindowProperty("Video Stream", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     
     rotation_lock = False
+    fullframe = False
 
     frame = 0
     part = 0
@@ -92,13 +99,16 @@ try:
                     image = Image.open(BytesIO(pic_buf))
                     image_np = np.array(image)
                     image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-                    num_rows, num_cols = image_cv.shape[:2]
-                    mask = np.zeros((num_rows, num_cols), np.uint8)
-                    cv2.circle(mask, (num_cols//2,num_rows//2), num_rows//2, 255, -1)
-                    image_masked = cv2.bitwise_and(image_cv, image_cv, mask = mask)
-                    rotation_matrix = cv2.getRotationMatrix2D((num_cols/2, num_rows/2), rotation + 90, 1)
-                    image_rotated = cv2.warpAffine(image_masked, rotation_matrix, (num_cols, num_rows))
-                    cv2.imshow('Video Stream', image_rotated)
+                    if not fullframe:
+                        num_rows, num_cols = image_cv.shape[:2]
+                        mask = np.zeros((num_rows, num_cols), np.uint8)
+                        cv2.circle(mask, (num_cols//2,num_rows//2), num_rows//2, 255, -1)
+                        image_masked = cv2.bitwise_and(image_cv, image_cv, mask = mask)
+                        rotation_matrix = cv2.getRotationMatrix2D((num_cols/2, num_rows/2), rotation + 90, 1)
+                        image_rotated = cv2.warpAffine(image_masked, rotation_matrix, (num_cols, num_rows))
+                        cv2.imshow('Video Stream', image_rotated)
+                    else:
+                        cv2.imshow('Video Stream', image_cv)
                 except OSError:
                     print("image corrupted")
             key = cv2.waitKey(1) & 0xFF
@@ -123,6 +133,26 @@ try:
                 ret = fd.write(pic_buf)
                 fd.close()
                 print("Wrote " + str(ret) + " bytes to out.jpg")
+            elif key == ord('+'):
+                if brightness < 100:
+                    brightness += 10
+                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                    print("Send data: ", data)
+                    sock_meta.sendto(data, (target_ip, target_port_meta))
+                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    received_data = reply.decode()
+                    print("Received data:", received_data)
+            elif key == ord('-'):
+                if brightness > 0:
+                    brightness -= 10
+                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                    print("Send data: ", data)
+                    sock_meta.sendto(data, (target_ip, target_port_meta))
+                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    received_data = reply.decode()
+                    print("Received data:", received_data)
+            elif key == ord('f'):
+                fullframe = not fullframe
             #print("new frame")
             pic_buf = bytearray()
         pic_buf += pic_data
