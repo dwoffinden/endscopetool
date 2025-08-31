@@ -99,16 +99,16 @@ try:
                     image = Image.open(BytesIO(pic_buf))
                     image_np = np.array(image)
                     image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+                    num_rows, num_cols = image_cv.shape[:2]
+                    rotation_matrix = cv2.getRotationMatrix2D((num_cols/2, num_rows/2), rotation + 90, 1)
                     if not fullframe:
-                        num_rows, num_cols = image_cv.shape[:2]
                         mask = np.zeros((num_rows, num_cols), np.uint8)
                         cv2.circle(mask, (num_cols//2,num_rows//2), num_rows//2, 255, -1)
                         image_masked = cv2.bitwise_and(image_cv, image_cv, mask = mask)
-                        rotation_matrix = cv2.getRotationMatrix2D((num_cols/2, num_rows/2), rotation + 90, 1)
                         image_rotated = cv2.warpAffine(image_masked, rotation_matrix, (num_cols, num_rows))
-                        cv2.imshow('Video Stream', image_rotated)
                     else:
-                        cv2.imshow('Video Stream', image_cv)
+                        image_rotated = cv2.warpAffine(image_cv, rotation_matrix, (num_cols, num_rows))
+                    cv2.imshow('Video Stream', image_rotated)
                 except OSError:
                     print("image corrupted")
             key = cv2.waitKey(1) & 0xFF
