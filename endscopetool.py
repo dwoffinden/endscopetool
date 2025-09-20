@@ -134,8 +134,14 @@ try:
                         ]
 
                     else:
-                        # Case 2: Full frame. The window will be a square of the LONGER dimension.
-                        square_size = max(num_rows, num_cols)
+                        # Case 2: Full frame, ensuring no corners are ever cropped.
+                        # The window will be a square with side length equal to the image diagonal.
+
+                        # Calculate the length of the image diagonal
+                        diagonal = np.sqrt(num_cols**2 + num_rows**2)
+
+                        # The new square size is the diagonal, rounded up to the nearest integer
+                        square_size = int(np.ceil(diagonal))
 
                         # Get the rotation matrix centered on the original image
                         rotation_matrix = cv2.getRotationMatrix2D(
