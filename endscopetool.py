@@ -100,23 +100,60 @@ try:
                     image_np = np.array(image)
                     image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
                     num_rows, num_cols = image_cv.shape[:2]
-                    rotation_matrix = cv2.getRotationMatrix2D(
-                        (num_cols / 2, num_rows / 2), rotation + 90, 1
-                    )
+
                     if not fullframe:
+                        # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
+                        square_size = min(num_rows, num_cols)
+
+                        # Create a circular mask on the original image dimensions
                         mask = np.zeros((num_rows, num_cols), np.uint8)
                         cv2.circle(
-                            mask, (num_cols // 2, num_rows // 2), num_rows // 2, 255, -1
+                            mask,
+                            (num_cols // 2, num_rows // 2),
+                            square_size // 2,
+                            255,
+                            -1,
                         )
                         image_masked = cv2.bitwise_and(image_cv, image_cv, mask=mask)
+
+                        # Get rotation matrix for the original image
+                        rotation_matrix = cv2.getRotationMatrix2D(
+                            (num_cols / 2, num_rows / 2), rotation + 90, 1
+                        )
+                        # Rotate the masked image within its original frame
                         image_rotated = cv2.warpAffine(
                             image_masked, rotation_matrix, (num_cols, num_rows)
                         )
+
+                        # Crop the center square from the rotated image
+                        center_x, center_y = num_cols // 2, num_rows // 2
+                        half_size = square_size // 2
+                        image_to_show = image_rotated[
+                            center_y - half_size : center_y + half_size,
+                            center_x - half_size : center_x + half_size,
+                        ]
+
                     else:
-                        image_rotated = cv2.warpAffine(
-                            image_cv, rotation_matrix, (num_cols, num_rows)
+                        # Case 2: Full frame. The window will be a square of the LONGER dimension.
+                        square_size = max(num_rows, num_cols)
+
+                        # Get the rotation matrix centered on the original image
+                        rotation_matrix = cv2.getRotationMatrix2D(
+                            (num_cols / 2, num_rows / 2), rotation + 90, 1
                         )
-                    cv2.imshow("Video Stream", image_rotated)
+
+                        # Adjust the matrix's translation component to center the image on the new, larger canvas
+                        tx = (square_size - num_cols) / 2
+                        ty = (square_size - num_rows) / 2
+                        rotation_matrix[0, 2] += tx
+                        rotation_matrix[1, 2] += ty
+
+                        # Warp the original image onto the new square canvas
+                        image_to_show = cv2.warpAffine(
+                            image_cv, rotation_matrix, (square_size, square_size)
+                        )
+
+                    cv2.imshow("Video Stream", image_to_show)
                 except OSError:
                     print("image corrupted")
             key = cv2.waitKey(1) & 0xFF
