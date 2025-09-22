@@ -11,9 +11,55 @@ import socket
 import sys
 import cv2
 import numpy as np
+import time
+import collections
 from PIL import Image
 from io import BytesIO
+from urllib.parse import parse_qs
 
+def get_battery_level(query_string):
+    """
+    Extracts the battery level from a string like 'type=2001&data=23'.
+    Returns an integer or None if not found or invalid.
+    """
+    try:
+        params = parse_qs(query_string)
+        return int(params["data"][0]) / 100
+    except (KeyError, IndexError, ValueError):
+        return None
+
+def draw_battery(img, x, y, width, height, level):
+    """
+    Draw a battery icon at (x, y) with given width, height and charge level (0 to 1).
+    """
+    # Clamp level to [0, 1]
+    level = max(0, min(float(level), 1.0))
+
+    # Colors
+    border_color = (255, 255, 255)
+    fill_color = (0, 255, 0) if level > 0.3 else (0, 0, 255)  # Red if low battery
+
+    # Draw battery outline
+    cv2.rectangle(img, (x, y), (x + width, y + height), border_color, 2)
+
+    # Draw battery tip
+    tip_width = int(width * 0.08)
+    tip_x = x + width
+    tip_y = y + int(height * 0.3)
+    tip_height = int(height * 0.4)
+    cv2.rectangle(img, (tip_x, tip_y), (tip_x + tip_width, tip_y + tip_height), border_color, -1)
+
+    # Fill battery level
+    fill_width = int((width - 4) * level)
+    cv2.rectangle(img, (x + 2, y + 2), (x + 2 + fill_width, y + height - 2), fill_color, -1)
+
+def absolute_frame_from_raw(raw_frame, latest_abs_frame):
+    # Find the multiple of 256 that makes raw_frame closest to latest_abs_frame
+    base = (latest_abs_frame // 256) * 256
+    candidates = [base - 256 + raw_frame, base + raw_frame, base + 256 + raw_frame]
+    # pick the candidate closest to latest_abs_frame
+    abs_frame = min(candidates, key=lambda x: abs(x - latest_abs_frame))
+    return abs_frame
 
 buffer_size = 1500
 target_ip = "192.168.1.1"
@@ -31,7 +77,6 @@ sock_vid.bind(("0.0.0.0", source_port_vid))
 sock_vid.settimeout(5.0)
 brightness = 100
 
-
 try:
     # get system info
     data = "type=1002\x0a".encode()
@@ -40,8 +85,6 @@ try:
     received_data = reply.decode()
 
     print("Received data:", received_data)
-    # print("Sender address:", addr)
-    # type=2002&protocol=2&w=640&h=480&fps=20&ratio=4:3&angle=270&hardware=V1.1&company=vitcoco&id=a07b4c3092607cf29daaab607cf20000&firmware=1820220727&ssid=softish-31986&dn=Y8&bl=30
 
     # Battery?
     data = "type=1001\x0a".encode()
@@ -73,19 +116,28 @@ try:
     # print("Sender address:", addr)
 
     cv2.namedWindow("Video Stream", cv2.WINDOW_NORMAL)
-    # cv2.setWindowProperty("Video Stream", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.resizeWindow("Video Stream", 1280, 720)
 
     rotation_lock = False
     fullframe = False
 
+    battery_level = 0
+    latest_frame = 0
+    raw_frame = 0
     frame = 0
     part = 0
     pic_buf = bytearray()
     JPEG_HEADER = bytes.fromhex("FF D8 FF E0 00 10 4A 46 49 46")
+    keep_awake_time = time.time()
+
+    # Store received parts per frame
+    frames_dict = {}  # frame_number -> {part_number: pic_data}
+    parts_dict = {} # number of parts required per frame
+
     while True:
         # read video stream
         reply, addr = sock_vid.recvfrom(buffer_size)
-        frame = reply[0]
+        raw_frame = reply[0]
         frame_end = reply[1]
         part = reply[2]
         part_end = reply[3]
@@ -93,8 +145,22 @@ try:
         if not rotation_lock:
             rotation = int.from_bytes(reply[4:6], "big")
         pic_data = reply[8:]
-        if pic_data.find(JPEG_HEADER) > -1:
-            if len(pic_buf) > 0:
+
+        frame = absolute_frame_from_raw(raw_frame, frame)
+
+        # store the part
+        if frame not in frames_dict:
+            frames_dict[frame] = {}
+        frames_dict[frame][part] = pic_data
+
+        # find number of frames required
+        if frame_end == 1:
+            parts_dict[frame] = part_end
+
+        if frame in parts_dict:
+            if parts_dict[frame] == len(frames_dict[frame]):
+                pic_buf = b''.join(frames_dict[frame][i] for i in range(parts_dict[frame]))
+
                 try:
                     image = Image.open(BytesIO(pic_buf))
                     image_np = np.array(image)
@@ -159,7 +225,21 @@ try:
                             image_cv, rotation_matrix, (square_size, square_size)
                         )
 
+                    draw_battery(image_to_show, x=5, y=5, width=15, height=8, level=battery_level)
                     cv2.imshow("Video Stream", image_to_show)
+
+                    #delete earlier frame data
+                    frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
+                    parts_dict = {f: parts_dict[f] for f in parts_dict if f >= frame}
+
+                    if time.time() > keep_awake_time:
+                        keep_awake_time = time.time() + 10
+                        # Battery?
+                        data = "type=1001\x0a".encode()
+                        sock_meta.sendto(data, (target_ip, target_port_meta))
+                        reply, addr = sock_meta.recvfrom(buffer_size)
+                        battery_level = get_battery_level(reply.decode())
+
                 except OSError:
                     print("image corrupted")
             key = cv2.waitKey(1) & 0xFF
@@ -204,12 +284,6 @@ try:
                     print("Received data:", received_data)
             elif key == ord("f"):
                 fullframe = not fullframe
-            # print("new frame")
-            pic_buf = bytearray()
-        pic_buf += pic_data
-        # print(frame, part, len(pic_buf))
-        # print(misc_data[0], misc_data[1], misc_data[2], misc_data[3])
-        # print(rotation)
 
 
 finally:
