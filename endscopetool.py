@@ -129,7 +129,6 @@ try:
     # print("Sender address:", addr)
 
     cv2.namedWindow("Video Stream", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Video Stream", 1280, 720)
 
     rotation_lock = False
     fullframe = False
@@ -249,6 +248,7 @@ try:
                         level=battery_level,
                         thickness=square_size // 200,
                     )
+                    cv2.resizeWindow("Video Stream", square_size, square_size)
                     cv2.imshow("Video Stream", image_to_show)
 
                     # delete earlier frame data
