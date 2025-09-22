@@ -17,6 +17,7 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
 
+
 def get_battery_level(query_string):
     """
     Extracts the battery level from a string like 'type=2001&data=23'.
@@ -27,6 +28,7 @@ def get_battery_level(query_string):
         return int(params["data"][0]) / 100
     except (KeyError, IndexError, ValueError):
         return None
+
 
 def draw_battery(img, x, y, width, height, level):
     """
@@ -47,11 +49,16 @@ def draw_battery(img, x, y, width, height, level):
     tip_x = x + width
     tip_y = y + int(height * 0.3)
     tip_height = int(height * 0.4)
-    cv2.rectangle(img, (tip_x, tip_y), (tip_x + tip_width, tip_y + tip_height), border_color, -1)
+    cv2.rectangle(
+        img, (tip_x, tip_y), (tip_x + tip_width, tip_y + tip_height), border_color, -1
+    )
 
     # Fill battery level
     fill_width = int((width - 4) * level)
-    cv2.rectangle(img, (x + 2, y + 2), (x + 2 + fill_width, y + height - 2), fill_color, -1)
+    cv2.rectangle(
+        img, (x + 2, y + 2), (x + 2 + fill_width, y + height - 2), fill_color, -1
+    )
+
 
 def absolute_frame_from_raw(raw_frame, latest_abs_frame):
     # Find the multiple of 256 that makes raw_frame closest to latest_abs_frame
@@ -60,6 +67,7 @@ def absolute_frame_from_raw(raw_frame, latest_abs_frame):
     # pick the candidate closest to latest_abs_frame
     abs_frame = min(candidates, key=lambda x: abs(x - latest_abs_frame))
     return abs_frame
+
 
 buffer_size = 1500
 target_ip = "192.168.1.1"
@@ -132,7 +140,7 @@ try:
 
     # Store received parts per frame
     frames_dict = {}  # frame_number -> {part_number: pic_data}
-    parts_dict = {} # number of parts required per frame
+    parts_dict = {}  # number of parts required per frame
 
     while True:
         # read video stream
@@ -159,7 +167,9 @@ try:
 
         if frame in parts_dict:
             if parts_dict[frame] == len(frames_dict[frame]):
-                pic_buf = b''.join(frames_dict[frame][i] for i in range(parts_dict[frame]))
+                pic_buf = b"".join(
+                    frames_dict[frame][i] for i in range(parts_dict[frame])
+                )
 
                 try:
                     image = Image.open(BytesIO(pic_buf))
@@ -225,10 +235,12 @@ try:
                             image_cv, rotation_matrix, (square_size, square_size)
                         )
 
-                    draw_battery(image_to_show, x=5, y=5, width=15, height=8, level=battery_level)
+                    draw_battery(
+                        image_to_show, x=5, y=5, width=15, height=8, level=battery_level
+                    )
                     cv2.imshow("Video Stream", image_to_show)
 
-                    #delete earlier frame data
+                    # delete earlier frame data
                     frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
                     parts_dict = {f: parts_dict[f] for f in parts_dict if f >= frame}
 
