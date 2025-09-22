@@ -30,7 +30,7 @@ def get_battery_level(query_string):
         return None
 
 
-def draw_battery(img, x, y, width, height, level):
+def draw_battery(img, x, y, width, height, level, thickness):
     """
     Draw a battery icon at (x, y) with given width, height and charge level (0 to 1).
     """
@@ -42,7 +42,7 @@ def draw_battery(img, x, y, width, height, level):
     fill_color = (0, 255, 0) if level > 0.3 else (0, 0, 255)  # Red if low battery
 
     # Draw battery outline
-    cv2.rectangle(img, (x, y), (x + width, y + height), border_color, 2)
+    cv2.rectangle(img, (x, y), (x + width, y + height), border_color, thickness)
 
     # Draw battery tip
     tip_width = int(width * 0.08)
@@ -236,7 +236,13 @@ try:
                         )
 
                     draw_battery(
-                        image_to_show, x=5, y=5, width=15, height=8, level=battery_level
+                        image_to_show,
+                        x=square_size // 100,
+                        y=square_size // 100,
+                        width=square_size // 10,
+                        height=square_size // 20,
+                        level=battery_level,
+                        thickness=square_size // 200,
                     )
                     cv2.imshow("Video Stream", image_to_show)
 
