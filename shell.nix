@@ -4,9 +4,9 @@ in
 pkgs.mkShell {
   packages = [
     pkgs.nixfmt-rfc-style
-    pkgs.gtk2
+    pkgs.gtk3
     (pkgs.python313.withPackages (ps: [
-      (ps.opencv4.override { enableGtk2 = true; })
+      (ps.opencv4.override { enableGtk3 = true; })
       ps.numpy
       ps.pillow
     ]))
