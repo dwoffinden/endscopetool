@@ -69,6 +69,7 @@ def absolute_frame_from_raw(raw_frame, latest_abs_frame):
     return abs_frame
 
 
+debug = False
 buffer_size = 1500
 target_ip = "192.168.1.1"
 target_port_meta = 61502
@@ -160,15 +161,20 @@ try:
             frames_dict[frame] = {}
         frames_dict[frame][part] = pic_data
 
-        # find number of frames required
+        if debug:
+            print(
+                f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
+            )
+
+        # find number of parts required
         if frame_end == 1:
             parts_dict[frame] = part_end
 
         if frame in parts_dict:
-            if parts_dict[frame] == len(frames_dict[frame]):
-                pic_buf = b"".join(
-                    frames_dict[frame][i] for i in range(parts_dict[frame])
-                )
+            num_parts = parts_dict[frame]
+            parts = frames_dict[frame]
+            if all(p in parts for p in range(num_parts)):
+                pic_buf = b"".join(parts[i] for i in range(num_parts))
 
                 try:
                     image = Image.open(BytesIO(pic_buf))
@@ -302,6 +308,8 @@ try:
                     print("Received data:", received_data)
             elif key == ord("f"):
                 fullframe = not fullframe
+            elif key == ord("d"):
+                debug = not debug
 
 
 finally:
