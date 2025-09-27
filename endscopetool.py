@@ -86,6 +86,9 @@ sock_vid.bind(("0.0.0.0", source_port_vid))
 sock_vid.settimeout(5.0)
 brightness = 100
 
+win_name = "Video Stream"
+firstframe = True
+
 try:
     # get system info
     data = "type=1002\x0a".encode()
@@ -124,7 +127,7 @@ try:
         print("UnicodeDecodeError, can be ignored")
     # print("Sender address:", addr)
 
-    cv2.namedWindow("Video Stream", cv2.WINDOW_NORMAL)
+    cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
     rotation_lock = False
     fullframe = False
@@ -239,6 +242,10 @@ try:
                         image_to_show = cv2.warpAffine(
                             image_cv, rotation_matrix, (square_size, square_size)
                         )
+                    if debug:
+                        print(
+                            f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
+                        )
 
                     draw_battery(
                         image_to_show,
@@ -249,8 +256,10 @@ try:
                         level=battery_level,
                         thickness=square_size // 200,
                     )
-                    cv2.resizeWindow("Video Stream", square_size, square_size)
-                    cv2.imshow("Video Stream", image_to_show)
+                    cv2.imshow(win_name, image_to_show)
+                    if firstframe:
+                        cv2.resizeWindow(win_name, square_size, square_size)
+                        firstframe = False
 
                     # delete earlier frame data
                     frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
@@ -266,50 +275,57 @@ try:
 
                 except OSError:
                     print("image corrupted")
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("1"):
-                rotation_lock = True
-                rotation = 0
-            elif key == ord("2"):
-                rotation_lock = True
-                rotation = 90
-            elif key == ord("3"):
-                rotation_lock = True
-                rotation = 180
-            elif key == ord("4"):
-                rotation_lock = True
-                rotation = 270
-            elif key == ord("r"):
-                rotation_lock = False
-            elif key == ord("q"):
-                break
-            elif key == ord("w"):
-                fd = open("out.jpg", "wb")
-                ret = fd.write(pic_buf)
-                fd.close()
-                print("Wrote " + str(ret) + " bytes to out.jpg")
-            elif key == ord("+"):
-                if brightness < 100:
-                    brightness += 10
-                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                    print("Send data: ", data)
-                    sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply, addr = sock_meta.recvfrom(buffer_size)
-                    received_data = reply.decode()
-                    print("Received data:", received_data)
-            elif key == ord("-"):
-                if brightness > 0:
-                    brightness -= 10
-                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                    print("Send data: ", data)
-                    sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply, addr = sock_meta.recvfrom(buffer_size)
-                    received_data = reply.decode()
-                    print("Received data:", received_data)
-            elif key == ord("f"):
-                fullframe = not fullframe
-            elif key == ord("d"):
-                debug = not debug
+
+        # process UI events (e.g. window closing) and poll for a keypress
+        key = cv2.pollKey() & 0xFF
+        if key == ord("1"):
+            rotation_lock = True
+            rotation = 0
+        elif key == ord("2"):
+            rotation_lock = True
+            rotation = 90
+        elif key == ord("3"):
+            rotation_lock = True
+            rotation = 180
+        elif key == ord("4"):
+            rotation_lock = True
+            rotation = 270
+        elif key == ord("r"):
+            rotation_lock = False
+        elif (
+            key == ord("q")
+            or key == 27
+            or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
+        ):
+            print("window closed")
+            break
+        elif key == ord("w"):
+            fd = open("out.jpg", "wb")
+            ret = fd.write(pic_buf)
+            fd.close()
+            print("Wrote " + str(ret) + " bytes to out.jpg")
+        elif key == ord("+"):
+            if brightness < 100:
+                brightness += 10
+                data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                print("Send data: ", data)
+                sock_meta.sendto(data, (target_ip, target_port_meta))
+                reply, addr = sock_meta.recvfrom(buffer_size)
+                received_data = reply.decode()
+                print("Received data:", received_data)
+        elif key == ord("-"):
+            if brightness > 0:
+                brightness -= 10
+                data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                print("Send data: ", data)
+                sock_meta.sendto(data, (target_ip, target_port_meta))
+                reply, addr = sock_meta.recvfrom(buffer_size)
+                received_data = reply.decode()
+                print("Received data:", received_data)
+        elif key == ord("f"):
+            fullframe = not fullframe
+        elif key == ord("d"):
+            debug = not debug
 
 
 finally:
@@ -319,3 +335,4 @@ finally:
     # Close the socket
     sock_meta.close()
     sock_vid.close()
+    cv2.destroyAllWindows()
