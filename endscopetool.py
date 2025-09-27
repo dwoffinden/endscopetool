@@ -89,23 +89,26 @@ brightness = 100
 win_name = "Video Stream"
 firstframe = True
 
+
+def query_battery():
+    # Battery?
+    data = "type=1001\x0a".encode()
+    sock_meta.sendto(data, (target_ip, target_port_meta))
+    reply, addr = sock_meta.recvfrom(buffer_size)
+    received_data = reply.decode()
+    return get_battery_level(received_data)
+
+
 try:
     # get system info
     data = "type=1002\x0a".encode()
     sock_meta.sendto(data, (target_ip, target_port_meta))
     reply, addr = sock_meta.recvfrom(buffer_size)
     received_data = reply.decode()
-
     print("Received data:", received_data)
 
-    # Battery?
-    data = "type=1001\x0a".encode()
-    sock_meta.sendto(data, (target_ip, target_port_meta))
-    reply, addr = sock_meta.recvfrom(buffer_size)
-    received_data = reply.decode()
-
-    print("Received data (Battery level?):", received_data)
-    # print("Sender address:", addr)
+    battery_level = query_battery()
+    print(f"Battery level: {battery_level}")
 
     # three times according to captured traffic
     data = "\x20\x36\x00\x02".encode()
@@ -132,7 +135,6 @@ try:
     rotation_lock = False
     fullframe = False
 
-    battery_level = 0
     latest_frame = 0
     raw_frame = 0
     frame = 0
@@ -267,11 +269,8 @@ try:
 
                     if time.time() > keep_awake_time:
                         keep_awake_time = time.time() + 10
-                        # Battery?
-                        data = "type=1001\x0a".encode()
-                        sock_meta.sendto(data, (target_ip, target_port_meta))
-                        reply, addr = sock_meta.recvfrom(buffer_size)
-                        battery_level = get_battery_level(reply.decode())
+                        battery_level = query_battery()
+                        print(f"Battery level: {battery_level}")
 
                 except OSError:
                     print("image corrupted")
