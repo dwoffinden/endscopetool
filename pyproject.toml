@@ -1,0 +1,16 @@
+[project]
+name = "endscopetool"
+version = "0.1.0"
+description = "Python implementation of the endscopetool Android application"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pillow",
+    "opencv"
+]
+
+[project.scripts]
+endscopetool = "endscopetool:main"
+
+[tool.setuptools]
+py-modules = ["endscopetool"]
