@@ -69,271 +69,268 @@ def absolute_frame_from_raw(raw_frame, latest_abs_frame):
     return abs_frame
 
 
-debug = False
-buffer_size = 1500
-target_ip = "192.168.1.1"
-target_port_meta = 61502
-source_port_meta = 50262
+def main():
+    debug = False
+    buffer_size = 1500
+    target_ip = "192.168.1.1"
+    target_port_meta = 61502
+    source_port_meta = 50262
 
-target_port_vid = 61503
-source_port_vid = 51320
+    target_port_vid = 61503
+    source_port_vid = 51320
 
-sock_meta = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock_meta.bind(("0.0.0.0", source_port_meta))
+    sock_meta = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_meta.bind(("0.0.0.0", source_port_meta))
 
-sock_vid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock_vid.bind(("0.0.0.0", source_port_vid))
-sock_vid.settimeout(5.0)
-brightness = 100
+    sock_vid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_vid.bind(("0.0.0.0", source_port_vid))
+    sock_vid.settimeout(5.0)
+    brightness = 100
 
-win_name = "Video Stream"
-firstframe = True
+    win_name = "Video Stream"
+    firstframe = True
 
+    def query_battery():
+        # Battery?
+        data = "type=1001\x0a".encode()
+        sock_meta.sendto(data, (target_ip, target_port_meta))
+        reply, addr = sock_meta.recvfrom(buffer_size)
+        received_data = reply.decode()
+        return get_battery_level(received_data)
 
-def query_battery():
-    # Battery?
-    data = "type=1001\x0a".encode()
-    sock_meta.sendto(data, (target_ip, target_port_meta))
-    reply, addr = sock_meta.recvfrom(buffer_size)
-    received_data = reply.decode()
-    return get_battery_level(received_data)
-
-
-try:
-    # get system info
-    data = "type=1002\x0a".encode()
-    sock_meta.sendto(data, (target_ip, target_port_meta))
-    reply, addr = sock_meta.recvfrom(buffer_size)
-    received_data = reply.decode()
-    print("Received data:", received_data)
-
-    battery_level = query_battery()
-    print(f"Battery level: {battery_level}")
-
-    # three times according to captured traffic
-    data = "\x20\x36\x00\x02".encode()
-    sock_vid.sendto(data, (target_ip, target_port_vid))
-    sock_vid.sendto(data, (target_ip, target_port_vid))
-    sock_vid.sendto(data, (target_ip, target_port_vid))
-
-    # set led brightness to 100%
-    data = "type=1003&value=100\x0a".encode()
-    # start with led off
-    # data = "type=1003&value=0\x0a".encode()
-    sock_meta.sendto(data, (target_ip, target_port_meta))
-    reply, addr = sock_meta.recvfrom(buffer_size)
-    # handle UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 21: invalid start byte gracefully
     try:
+        # get system info
+        data = "type=1002\x0a".encode()
+        sock_meta.sendto(data, (target_ip, target_port_meta))
+        reply, addr = sock_meta.recvfrom(buffer_size)
         received_data = reply.decode()
         print("Received data:", received_data)
-    except UnicodeDecodeError:
-        print("UnicodeDecodeError, can be ignored")
-    # print("Sender address:", addr)
 
-    cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
+        battery_level = query_battery()
+        print(f"Battery level: {battery_level}")
 
-    rotation_lock = False
-    fullframe = False
+        # three times according to captured traffic
+        data = "\x20\x36\x00\x02".encode()
+        sock_vid.sendto(data, (target_ip, target_port_vid))
+        sock_vid.sendto(data, (target_ip, target_port_vid))
+        sock_vid.sendto(data, (target_ip, target_port_vid))
 
-    latest_frame = 0
-    raw_frame = 0
-    frame = 0
-    part = 0
-    pic_buf = bytearray()
-    JPEG_HEADER = bytes.fromhex("FF D8 FF E0 00 10 4A 46 49 46")
-    keep_awake_time = time.time()
+        # set led brightness to 100%
+        data = "type=1003&value=100\x0a".encode()
+        sock_meta.sendto(data, (target_ip, target_port_meta))
+        reply, addr = sock_meta.recvfrom(buffer_size)
+        # handle UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 21: invalid start byte gracefully
+        try:
+            received_data = reply.decode()
+            print("Received data:", received_data)
+        except UnicodeDecodeError:
+            print("UnicodeDecodeError, can be ignored")
 
-    # Store received parts per frame
-    frames_dict = {}  # frame_number -> {part_number: pic_data}
-    parts_dict = {}  # number of parts required per frame
+        cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
-    while True:
-        # read video stream
-        reply, addr = sock_vid.recvfrom(buffer_size)
-        raw_frame = reply[0]
-        frame_end = reply[1]
-        part = reply[2]
-        part_end = reply[3]
-        misc_data = reply[4:8]
-        if not rotation_lock:
-            rotation = int.from_bytes(reply[4:6], "big")
-        pic_data = reply[8:]
+        rotation_lock = False
+        fullframe = False
 
-        frame = absolute_frame_from_raw(raw_frame, frame)
+        latest_frame = 0
+        raw_frame = 0
+        frame = 0
+        part = 0
+        pic_buf = bytearray()
+        keep_awake_time = time.time()
 
-        # store the part
-        if frame not in frames_dict:
-            frames_dict[frame] = {}
-        frames_dict[frame][part] = pic_data
+        # Store received parts per frame
+        frames_dict = {}  # frame_number -> {part_number: pic_data}
+        parts_dict = {}  # number of parts required per frame
 
-        if debug:
-            print(
-                f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
-            )
+        while True:
+            # read video stream
+            reply, addr = sock_vid.recvfrom(buffer_size)
+            raw_frame = reply[0]
+            frame_end = reply[1]
+            part = reply[2]
+            part_end = reply[3]
+            misc_data = reply[4:8]
+            if not rotation_lock:
+                rotation = int.from_bytes(reply[4:6], "big")
+            pic_data = reply[8:]
 
-        # find number of parts required
-        if frame_end == 1:
-            parts_dict[frame] = part_end
+            frame = absolute_frame_from_raw(raw_frame, frame)
 
-        if frame in parts_dict:
-            num_parts = parts_dict[frame]
-            parts = frames_dict[frame]
-            if all(p in parts for p in range(num_parts)):
-                pic_buf = b"".join(parts[i] for i in range(num_parts))
+            # store the part
+            if frame not in frames_dict:
+                frames_dict[frame] = {}
+            frames_dict[frame][part] = pic_data
 
-                try:
-                    image = Image.open(BytesIO(pic_buf))
-                    image_np = np.array(image)
-                    image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-                    num_rows, num_cols = image_cv.shape[:2]
+            if debug:
+                print(
+                    f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
+                )
 
-                    if not fullframe:
-                        # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
-                        square_size = min(num_rows, num_cols)
+            # find number of parts required
+            if frame_end == 1:
+                parts_dict[frame] = part_end
 
-                        # Create a circular mask on the original image dimensions
-                        mask = np.zeros((num_rows, num_cols), np.uint8)
-                        cv2.circle(
-                            mask,
-                            (num_cols // 2, num_rows // 2),
-                            square_size // 2,
-                            255,
-                            -1,
+            if frame in parts_dict:
+                num_parts = parts_dict[frame]
+                parts = frames_dict[frame]
+                if all(p in parts for p in range(num_parts)):
+                    pic_buf = b"".join(parts[i] for i in range(num_parts))
+
+                    try:
+                        image = Image.open(BytesIO(pic_buf))
+                        image_np = np.array(image)
+                        image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+                        num_rows, num_cols = image_cv.shape[:2]
+
+                        if not fullframe:
+                            # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
+                            square_size = min(num_rows, num_cols)
+
+                            # Create a circular mask on the original image dimensions
+                            mask = np.zeros((num_rows, num_cols), np.uint8)
+                            cv2.circle(
+                                mask,
+                                (num_cols // 2, num_rows // 2),
+                                square_size // 2,
+                                255,
+                                -1,
+                            )
+                            image_masked = cv2.bitwise_and(image_cv, image_cv, mask=mask)
+
+                            # Get rotation matrix for the original image
+                            rotation_matrix = cv2.getRotationMatrix2D(
+                                (num_cols / 2, num_rows / 2), rotation + 90, 1
+                            )
+                            # Rotate the masked image within its original frame
+                            image_rotated = cv2.warpAffine(
+                                image_masked, rotation_matrix, (num_cols, num_rows)
+                            )
+
+                            # Crop the center square from the rotated image
+                            center_x, center_y = num_cols // 2, num_rows // 2
+                            half_size = square_size // 2
+                            image_to_show = image_rotated[
+                                center_y - half_size : center_y + half_size,
+                                center_x - half_size : center_x + half_size,
+                            ]
+
+                        else:
+                            # Case 2: Full frame, ensuring no corners are ever cropped.
+                            # The window will be a square with side length equal to the image diagonal.
+
+                            # Calculate the length of the image diagonal
+                            diagonal = np.sqrt(num_cols**2 + num_rows**2)
+
+                            # The new square size is the diagonal, rounded up to the nearest integer
+                            square_size = int(np.ceil(diagonal))
+
+                            # Get the rotation matrix centered on the original image
+                            rotation_matrix = cv2.getRotationMatrix2D(
+                                (num_cols / 2, num_rows / 2), rotation + 90, 1
+                            )
+
+                            # Adjust the matrix's translation component to center the image on the new, larger canvas
+                            tx = (square_size - num_cols) / 2
+                            ty = (square_size - num_rows) / 2
+                            rotation_matrix[0, 2] += tx
+                            rotation_matrix[1, 2] += ty
+
+                            # Warp the original image onto the new square canvas
+                            image_to_show = cv2.warpAffine(
+                                image_cv, rotation_matrix, (square_size, square_size)
+                            )
+                        if debug:
+                            print(
+                                f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
+                            )
+
+                        draw_battery(
+                            image_to_show,
+                            x=square_size // 100,
+                            y=square_size // 100,
+                            width=square_size // 10,
+                            height=square_size // 20,
+                            level=battery_level,
+                            thickness=square_size // 200,
                         )
-                        image_masked = cv2.bitwise_and(image_cv, image_cv, mask=mask)
+                        cv2.imshow(win_name, image_to_show)
+                        if firstframe:
+                            cv2.resizeWindow(win_name, square_size, square_size)
+                            firstframe = False
 
-                        # Get rotation matrix for the original image
-                        rotation_matrix = cv2.getRotationMatrix2D(
-                            (num_cols / 2, num_rows / 2), rotation + 90, 1
-                        )
-                        # Rotate the masked image within its original frame
-                        image_rotated = cv2.warpAffine(
-                            image_masked, rotation_matrix, (num_cols, num_rows)
-                        )
+                        # delete earlier frame data
+                        frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
+                        parts_dict = {f: parts_dict[f] for f in parts_dict if f >= frame}
 
-                        # Crop the center square from the rotated image
-                        center_x, center_y = num_cols // 2, num_rows // 2
-                        half_size = square_size // 2
-                        image_to_show = image_rotated[
-                            center_y - half_size : center_y + half_size,
-                            center_x - half_size : center_x + half_size,
-                        ]
+                        if time.time() > keep_awake_time:
+                            keep_awake_time = time.time() + 10
+                            prev_battery_level = battery_level
+                            battery_level = query_battery()
+                            if prev_battery_level != battery_level:
+                                print(f"Battery level: {battery_level}")
 
-                    else:
-                        # Case 2: Full frame, ensuring no corners are ever cropped.
-                        # The window will be a square with side length equal to the image diagonal.
+                    except OSError:
+                        print("image corrupted")
 
-                        # Calculate the length of the image diagonal
-                        diagonal = np.sqrt(num_cols**2 + num_rows**2)
+            # process UI events (e.g. window closing) and poll for a keypress
+            key = cv2.pollKey() & 0xFF
+            if key == ord("1"):
+                rotation_lock = True
+                rotation = 0
+            elif key == ord("2"):
+                rotation_lock = True
+                rotation = 90
+            elif key == ord("3"):
+                rotation_lock = True
+                rotation = 180
+            elif key == ord("4"):
+                rotation_lock = True
+                rotation = 270
+            elif key == ord("r"):
+                rotation_lock = False
+            elif (
+                key == ord("q")
+                or key == 27
+                or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
+            ):
+                print("window closed")
+                break
+            elif key == ord("w"):
+                with open("out.jpg", "wb") as fd:
+                    ret = fd.write(pic_buf)
+                print("Wrote " + str(ret) + " bytes to out.jpg")
+            elif key == ord("+"):
+                if brightness < 100:
+                    brightness += 10
+                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                    print("Send data: ", data)
+                    sock_meta.sendto(data, (target_ip, target_port_meta))
+                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    received_data = reply.decode()
+                    print("Received data:", received_data)
+            elif key == ord("-"):
+                if brightness > 0:
+                    brightness -= 10
+                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
+                    print("Send data: ", data)
+                    sock_meta.sendto(data, (target_ip, target_port_meta))
+                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    received_data = reply.decode()
+                    print("Received data:", received_data)
+            elif key == ord("f"):
+                fullframe = not fullframe
+            elif key == ord("d"):
+                debug = not debug
 
-                        # The new square size is the diagonal, rounded up to the nearest integer
-                        square_size = int(np.ceil(diagonal))
-
-                        # Get the rotation matrix centered on the original image
-                        rotation_matrix = cv2.getRotationMatrix2D(
-                            (num_cols / 2, num_rows / 2), rotation + 90, 1
-                        )
-
-                        # Adjust the matrix's translation component to center the image on the new, larger canvas
-                        tx = (square_size - num_cols) / 2
-                        ty = (square_size - num_rows) / 2
-                        rotation_matrix[0, 2] += tx
-                        rotation_matrix[1, 2] += ty
-
-                        # Warp the original image onto the new square canvas
-                        image_to_show = cv2.warpAffine(
-                            image_cv, rotation_matrix, (square_size, square_size)
-                        )
-                    if debug:
-                        print(
-                            f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
-                        )
-
-                    draw_battery(
-                        image_to_show,
-                        x=square_size // 100,
-                        y=square_size // 100,
-                        width=square_size // 10,
-                        height=square_size // 20,
-                        level=battery_level,
-                        thickness=square_size // 200,
-                    )
-                    cv2.imshow(win_name, image_to_show)
-                    if firstframe:
-                        cv2.resizeWindow(win_name, square_size, square_size)
-                        firstframe = False
-
-                    # delete earlier frame data
-                    frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
-                    parts_dict = {f: parts_dict[f] for f in parts_dict if f >= frame}
-
-                    if time.time() > keep_awake_time:
-                        keep_awake_time = time.time() + 10
-                        prev_battery_level = battery_level
-                        battery_level = query_battery()
-                        if prev_battery_level != battery_level:
-                            print(f"Battery level: {battery_level}")
-
-                except OSError:
-                    print("image corrupted")
-
-        # process UI events (e.g. window closing) and poll for a keypress
-        key = cv2.pollKey() & 0xFF
-        if key == ord("1"):
-            rotation_lock = True
-            rotation = 0
-        elif key == ord("2"):
-            rotation_lock = True
-            rotation = 90
-        elif key == ord("3"):
-            rotation_lock = True
-            rotation = 180
-        elif key == ord("4"):
-            rotation_lock = True
-            rotation = 270
-        elif key == ord("r"):
-            rotation_lock = False
-        elif (
-            key == ord("q")
-            or key == 27
-            or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
-        ):
-            print("window closed")
-            break
-        elif key == ord("w"):
-            fd = open("out.jpg", "wb")
-            ret = fd.write(pic_buf)
-            fd.close()
-            print("Wrote " + str(ret) + " bytes to out.jpg")
-        elif key == ord("+"):
-            if brightness < 100:
-                brightness += 10
-                data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                print("Send data: ", data)
-                sock_meta.sendto(data, (target_ip, target_port_meta))
-                reply, addr = sock_meta.recvfrom(buffer_size)
-                received_data = reply.decode()
-                print("Received data:", received_data)
-        elif key == ord("-"):
-            if brightness > 0:
-                brightness -= 10
-                data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                print("Send data: ", data)
-                sock_meta.sendto(data, (target_ip, target_port_meta))
-                reply, addr = sock_meta.recvfrom(buffer_size)
-                received_data = reply.decode()
-                print("Received data:", received_data)
-        elif key == ord("f"):
-            fullframe = not fullframe
-        elif key == ord("d"):
-            debug = not debug
+    finally:
+        # stop stream
+        data = "\x20\x37".encode()
+        sock_vid.sendto(data, (target_ip, target_port_vid))
+        # Close the socket
+        sock_meta.close()
+        sock_vid.close()
+        cv2.destroyAllWindows()
 
 
-finally:
-    # stop stream
-    data = "\x20\x37".encode()
-    sock_vid.sendto(data, (target_ip, target_port_vid))
-    # Close the socket
-    sock_meta.close()
-    sock_vid.close()
-    cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
