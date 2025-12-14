@@ -269,8 +269,10 @@ try:
 
                     if time.time() > keep_awake_time:
                         keep_awake_time = time.time() + 10
+                        prev_battery_level = battery_level
                         battery_level = query_battery()
-                        print(f"Battery level: {battery_level}")
+                        if prev_battery_level != battery_level:
+                            print(f"Battery level: {battery_level}")
 
                 except OSError:
                     print("image corrupted")
