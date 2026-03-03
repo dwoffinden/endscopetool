@@ -32,6 +32,7 @@ def get_battery_level(query_string):
         params = parse_qs(query_string)
         return int(params["data"][0]) / 100
     except (KeyError, IndexError, ValueError):
+        print(f"failed to extract battery from data: ${query_string}")
         return None
 
 
