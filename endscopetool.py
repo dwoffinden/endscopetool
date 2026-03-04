@@ -8,11 +8,9 @@
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
 
 import socket
-import sys
 import cv2
 import numpy as np
 import time
-import collections
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
@@ -132,7 +130,6 @@ def main():
         rotation_lock = False
         fullframe = False
 
-        latest_frame = 0
         raw_frame = 0
         frame = 0
         part = 0
@@ -150,7 +147,7 @@ def main():
             frame_end = reply[1]
             part = reply[2]
             part_end = reply[3]
-            misc_data = reply[4:8]
+            # misc_data = reply[4:8]
             if not rotation_lock:
                 rotation = int.from_bytes(reply[4:6], "big")
             pic_data = reply[8:]
@@ -196,7 +193,9 @@ def main():
                                 255,
                                 -1,
                             )
-                            image_masked = cv2.bitwise_and(image_cv, image_cv, mask=mask)
+                            image_masked = cv2.bitwise_and(
+                                image_cv, image_cv, mask=mask
+                            )
 
                             # Get rotation matrix for the original image
                             rotation_matrix = cv2.getRotationMatrix2D(
@@ -260,8 +259,12 @@ def main():
                             firstframe = False
 
                         # delete earlier frame data
-                        frames_dict = {f: frames_dict[f] for f in frames_dict if f >= frame}
-                        parts_dict = {f: parts_dict[f] for f in parts_dict if f >= frame}
+                        frames_dict = {
+                            f: frames_dict[f] for f in frames_dict if f >= frame
+                        }
+                        parts_dict = {
+                            f: parts_dict[f] for f in parts_dict if f >= frame
+                        }
 
                         if time.time() > keep_awake_time:
                             keep_awake_time = time.time() + 10
