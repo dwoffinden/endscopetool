@@ -16,7 +16,7 @@ from io import BytesIO
 from urllib.parse import parse_qs
 
 
-def get_battery_level(query_string):
+def get_battery_level(query_string: str) -> float | None:
     """
     Extracts the battery level from a string like 'type=2001&data=23'.
     Returns an integer or None if not found or invalid.
@@ -29,12 +29,20 @@ def get_battery_level(query_string):
         return None
 
 
-def draw_battery(img, x, y, width, height, level, thickness):
+def draw_battery(
+    img: cv2.typing.MatLike,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    level: float,
+    thickness: int,
+) -> None:
     """
     Draw a battery icon at (x, y) with given width, height and charge level (0 to 1).
     """
     # Clamp level to [0, 1]
-    level = max(0, min(float(level), 1.0))
+    level = max(0, min(level, 1.0))
 
     # Colors
     border_color = (255, 255, 255)
@@ -59,7 +67,7 @@ def draw_battery(img, x, y, width, height, level, thickness):
     )
 
 
-def absolute_frame_from_raw(raw_frame, latest_abs_frame):
+def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
     # Find the multiple of 256 that makes raw_frame closest to latest_abs_frame
     base = (latest_abs_frame // 256) * 256
     candidates = [base - 256 + raw_frame, base + raw_frame, base + 256 + raw_frame]
@@ -68,7 +76,7 @@ def absolute_frame_from_raw(raw_frame, latest_abs_frame):
     return abs_frame
 
 
-def main():
+def main() -> None:
     debug = False
     buffer_size = 1500
     target_ip = "192.168.1.1"
@@ -89,23 +97,23 @@ def main():
     win_name = "Video Stream"
     firstframe = True
 
-    def query_battery():
+    def query_battery() -> float | None:
         # Battery?
-        data = "type=1001\x0a".encode()
+        data: bytes = "type=1001\x0a".encode()
         sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply, addr = sock_meta.recvfrom(buffer_size)
-        received_data = reply.decode()
+        reply: bytes = sock_meta.recvfrom(buffer_size)[0]
+        received_data: str = reply.decode()
         return get_battery_level(received_data)
 
     try:
         # get system info
-        data = "type=1002\x0a".encode()
+        data: bytes = "type=1002\x0a".encode()
         sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply, addr = sock_meta.recvfrom(buffer_size)
+        reply: bytes = sock_meta.recvfrom(buffer_size)[0]
         received_data = reply.decode()
         print("Received data:", received_data)
 
-        battery_level = query_battery()
+        battery_level: float | None = query_battery()
         print(f"Battery level: {battery_level}")
 
         # three times according to captured traffic
@@ -117,7 +125,7 @@ def main():
         # set led brightness to 100%
         data = "type=1003&value=100\x0a".encode()
         sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply, addr = sock_meta.recvfrom(buffer_size)
+        reply = sock_meta.recvfrom(buffer_size)[0]
         # handle UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 21: invalid start byte gracefully
         try:
             received_data = reply.decode()
@@ -128,25 +136,28 @@ def main():
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
         rotation_lock = False
+        rotation = 0
         fullframe = False
 
         raw_frame = 0
         frame = 0
         part = 0
-        pic_buf = bytearray()
+        pic_buf = b""
         keep_awake_time = time.time()
 
         # Store received parts per frame
-        frames_dict = {}  # frame_number -> {part_number: pic_data}
-        parts_dict = {}  # number of parts required per frame
+        # frame_number -> {part_number: pic_data}
+        frames_dict: dict[int, dict[int, bytes]] = {}
+        # number of parts required per frame
+        parts_dict: dict[int, int] = {}
 
         while True:
             # read video stream
-            reply, addr = sock_vid.recvfrom(buffer_size)
+            reply = sock_vid.recvfrom(buffer_size)[0]
             raw_frame = reply[0]
-            frame_end = reply[1]
+            frame_end: int = reply[1]
             part = reply[2]
-            part_end = reply[3]
+            part_end: int = reply[3]
             # misc_data = reply[4:8]
             if not rotation_lock:
                 rotation = int.from_bytes(reply[4:6], "big")
@@ -244,15 +255,16 @@ def main():
                                 f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
                             )
 
-                        draw_battery(
-                            image_to_show,
-                            x=square_size // 100,
-                            y=square_size // 100,
-                            width=square_size // 10,
-                            height=square_size // 20,
-                            level=battery_level,
-                            thickness=square_size // 200,
-                        )
+                        if battery_level is not None:
+                            draw_battery(
+                                image_to_show,
+                                x=square_size // 100,
+                                y=square_size // 100,
+                                width=square_size // 10,
+                                height=square_size // 20,
+                                level=battery_level,
+                                thickness=square_size // 200,
+                            )
                         cv2.imshow(win_name, image_to_show)
                         if firstframe:
                             cv2.resizeWindow(win_name, square_size, square_size)
@@ -309,7 +321,7 @@ def main():
                     data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
                     print("Send data: ", data)
                     sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    reply = sock_meta.recvfrom(buffer_size)[0]
                     received_data = reply.decode()
                     print("Received data:", received_data)
             elif key == ord("-"):
@@ -318,7 +330,7 @@ def main():
                     data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
                     print("Send data: ", data)
                     sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply, addr = sock_meta.recvfrom(buffer_size)
+                    reply = sock_meta.recvfrom(buffer_size)[0]
                     received_data = reply.decode()
                     print("Received data:", received_data)
             elif key == ord("f"):
