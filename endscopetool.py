@@ -19,6 +19,87 @@ import time
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
+from typing import Protocol, runtime_checkable
+
+
+@runtime_checkable
+class UdpChannelInterface(Protocol):
+    def send(self, data: bytes) -> None: ...
+
+    def recv(self) -> bytes: ...
+
+    def close(self) -> None: ...
+
+    def set_timeout(self, timeout: float | None) -> None: ...
+
+
+class UdpChannel:
+    def __init__(
+        self, local_port: int, target_ip: str, target_port: int, buffer_size: int = 1500
+    ):
+        self.target_address = (target_ip, target_port)
+        self.buffer_size = buffer_size
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("0.0.0.0", local_port))
+
+    def send(self, data: bytes) -> None:
+        self.sock.sendto(data, self.target_address)
+
+    def recv(self) -> bytes:
+        return self.sock.recvfrom(self.buffer_size)[0]
+
+    def close(self) -> None:
+        self.sock.close()
+
+    def set_timeout(self, timeout: float | None) -> None:
+        self.sock.settimeout(timeout)
+
+
+class EndscopeConnection:
+    def __init__(
+        self, meta_channel: UdpChannelInterface, vid_channel: UdpChannelInterface
+    ):
+        self.meta = meta_channel
+        self.vid = vid_channel
+
+    def query_battery(self) -> float | None:
+        data: bytes = "type=1001\x0a".encode()
+        self.meta.send(data)
+        reply = self.meta.recv()
+        received_data: str = reply.decode()
+        return get_battery_level(received_data)
+
+    def set_brightness(self, level: int) -> str:
+        data = f"type=1003&value={level}\x0a".encode()
+        self.meta.send(data)
+        reply = self.meta.recv()
+        try:
+            return reply.decode()
+        except UnicodeDecodeError:
+            return "UnicodeDecodeError"
+
+    def get_system_info(self) -> str:
+        data: bytes = "type=1002\x0a".encode()
+        self.meta.send(data)
+        reply = self.meta.recv()
+        return reply.decode()
+
+    def start_video(self) -> None:
+        # three times according to captured traffic
+        data = "\x20\x36\x00\x02".encode()
+        for _ in range(3):
+            self.vid.send(data)
+
+    def stop_video(self) -> None:
+        data = "\x20\x37".encode()
+        self.vid.send(data)
+
+    def recv_video(self) -> bytes:
+        return self.vid.recv()
+
+    def close(self) -> None:
+        self.meta.close()
+        self.vid.close()
 
 
 def get_battery_level(query_string: str) -> float | None:
@@ -91,52 +172,31 @@ def main() -> None:
     target_port_vid = 61503
     source_port_vid = 51320
 
-    sock_meta = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock_meta.bind(("0.0.0.0", source_port_meta))
+    # Initialize connection
+    meta_chan = UdpChannel(source_port_meta, target_ip, target_port_meta, buffer_size)
+    vid_chan = UdpChannel(source_port_vid, target_ip, target_port_vid, buffer_size)
+    vid_chan.set_timeout(5.0)
+    conn = EndscopeConnection(meta_chan, vid_chan)
 
-    sock_vid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock_vid.bind(("0.0.0.0", source_port_vid))
-    sock_vid.settimeout(5.0)
     brightness = 100
 
     win_name = "Video Stream"
     firstframe = True
 
-    def query_battery() -> float | None:
-        # Battery?
-        data: bytes = "type=1001\x0a".encode()
-        sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply: bytes = sock_meta.recvfrom(buffer_size)[0]
-        received_data: str = reply.decode()
-        return get_battery_level(received_data)
-
     try:
         # get system info
-        data: bytes = "type=1002\x0a".encode()
-        sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply: bytes = sock_meta.recvfrom(buffer_size)[0]
-        received_data = reply.decode()
+        received_data = conn.get_system_info()
         print("Received data:", received_data)
 
-        battery_level: float | None = query_battery()
+        battery_level: float | None = conn.query_battery()
         print(f"Battery level: {battery_level}")
 
         # three times according to captured traffic
-        data = "\x20\x36\x00\x02".encode()
-        sock_vid.sendto(data, (target_ip, target_port_vid))
-        sock_vid.sendto(data, (target_ip, target_port_vid))
-        sock_vid.sendto(data, (target_ip, target_port_vid))
+        conn.start_video()
 
         # set led brightness to 100%
-        data = "type=1003&value=100\x0a".encode()
-        sock_meta.sendto(data, (target_ip, target_port_meta))
-        reply = sock_meta.recvfrom(buffer_size)[0]
-        # handle UnicodeDecodeError: 'utf-8' codec can't decode byte 0xaa in position 21: invalid start byte gracefully
-        try:
-            received_data = reply.decode()
-            print("Received data:", received_data)
-        except UnicodeDecodeError:
-            print("UnicodeDecodeError, can be ignored")
+        received_data = conn.set_brightness(100)
+        print("Received data:", received_data)
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
@@ -158,7 +218,7 @@ def main() -> None:
 
         while True:
             # read video stream
-            reply = sock_vid.recvfrom(buffer_size)[0]
+            reply = conn.recv_video()
             raw_frame = reply[0]
             frame_end: int = reply[1]
             part = reply[2]
@@ -286,7 +346,7 @@ def main() -> None:
                         if time.time() > keep_awake_time:
                             keep_awake_time = time.time() + 10
                             prev_battery_level = battery_level
-                            battery_level = query_battery()
+                            battery_level = conn.query_battery()
                             if prev_battery_level != battery_level:
                                 print(f"Battery level: {battery_level}")
 
@@ -323,20 +383,12 @@ def main() -> None:
             elif key == ord("+"):
                 if brightness < 100:
                     brightness += 10
-                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                    print("Send data: ", data)
-                    sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply = sock_meta.recvfrom(buffer_size)[0]
-                    received_data = reply.decode()
+                    received_data = conn.set_brightness(brightness)
                     print("Received data:", received_data)
             elif key == ord("-"):
                 if brightness > 0:
                     brightness -= 10
-                    data = ("type=1003&value=" + str(brightness) + "\x0a").encode()
-                    print("Send data: ", data)
-                    sock_meta.sendto(data, (target_ip, target_port_meta))
-                    reply = sock_meta.recvfrom(buffer_size)[0]
-                    received_data = reply.decode()
+                    received_data = conn.set_brightness(brightness)
                     print("Received data:", received_data)
             elif key == ord("f"):
                 fullframe = not fullframe
@@ -344,12 +396,9 @@ def main() -> None:
                 debug = not debug
 
     finally:
-        # stop stream
-        data = "\x20\x37".encode()
-        sock_vid.sendto(data, (target_ip, target_port_vid))
-        # Close the socket
-        sock_meta.close()
-        sock_vid.close()
+        # stop stream and close
+        conn.stop_video()
+        conn.close()
         cv2.destroyAllWindows()
 
 
