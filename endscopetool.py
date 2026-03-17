@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
+#
 # Python implementation of the endscopetool (sic!) Android application used for the Vitcoco ear wax remover camera thingy.
-# CC-0 / Public Domain
-# (0) 2023 Raphael Wimmer
+#
+# Original version released at https://gist.github.com/RaphaelWimmer/5bcb286414e6cd38ed38724f9a6a6129
+# under CC0 / Public Domain (0) 2023 Raphael Wimmer.
+# Contributions by https://github.com/Aghei2.
+#
 # v0.1.0
 # reverse-engineered using a packet capture log - this means that I have no idea what all those magic numbers mean
 # and whether there are further features that might be supported by the hardware
