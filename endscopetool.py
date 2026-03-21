@@ -187,6 +187,8 @@ def main() -> None:
         # get system info
         received_data = conn.get_system_info()
         print("Received data:", received_data)
+        # TODO: parse? Example:
+        # Received data: type=2002&protocol=2&w=640&h=480&fps=20&ratio=4:3&angle=270&hardware=V1.1&company=vitcoco&id=4e18d7c8054f5d209daaab4f5d200000&firmware=2030072618&ssid=softish-23840&dn=Y8&bl=30
 
         battery_level: float | None = conn.query_battery()
         print(f"Battery level: {battery_level}")
@@ -197,6 +199,9 @@ def main() -> None:
         # set led brightness to 100%
         received_data = conn.set_brightness(100)
         print("Received data:", received_data)
+        # TODO: parse? Example:
+        # Received data: type=1003&value=100
+        # !@
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
