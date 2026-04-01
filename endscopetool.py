@@ -12,10 +12,10 @@
 # and whether there are further features that might be supported by the hardware
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
 
-import socket
 import cv2
 import numpy as np
-import time
+import trio
+import argparse
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
@@ -23,83 +23,113 @@ from typing import Protocol, runtime_checkable
 
 
 @runtime_checkable
-class UdpChannelInterface(Protocol):
-    def send(self, data: bytes) -> None: ...
+class AsyncDatagramChannel(Protocol):
+    async def send(self, data: bytes) -> None: ...
 
-    def recv(self) -> bytes: ...
+    async def recv(self) -> bytes: ...
 
-    def close(self) -> None: ...
-
-    def set_timeout(self, timeout: float | None) -> None: ...
+    async def aclose(self) -> None: ...
 
 
-class UdpChannel:
+class TrioUdpChannel:
     def __init__(
         self, local_port: int, target_ip: str, target_port: int, buffer_size: int = 1500
     ):
+        self.local_port = local_port
         self.target_address = (target_ip, target_port)
         self.buffer_size = buffer_size
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", local_port))
+        self.sock: trio.socket.SocketType | None = None
 
-    def send(self, data: bytes) -> None:
-        self.sock.sendto(data, self.target_address)
+    async def __aenter__(self):
+        import trio.socket
 
-    def recv(self) -> bytes:
-        return self.sock.recvfrom(self.buffer_size)[0]
+        self.sock = trio.socket.socket(trio.socket.AF_INET, trio.socket.SOCK_DGRAM)
+        await self.sock.bind(("0.0.0.0", self.local_port))
+        return self
 
-    def close(self) -> None:
-        self.sock.close()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.aclose()
 
-    def set_timeout(self, timeout: float | None) -> None:
-        self.sock.settimeout(timeout)
+    async def send(self, data: bytes) -> None:
+        assert self.sock is not None
+        await self.sock.sendto(data, self.target_address)
+
+    async def recv(self) -> bytes:
+        assert self.sock is not None
+        data, _ = await self.sock.recvfrom(self.buffer_size)
+        return data
+
+    async def aclose(self) -> None:
+        if self.sock:
+            self.sock.close()
+            self.sock = None
+
+
+class MemoryDatagramChannel:
+    def __init__(
+        self,
+        send_channel: trio.MemorySendChannel,
+        receive_channel: trio.MemoryReceiveChannel,
+    ):
+        self.send_channel = send_channel
+        self.receive_channel = receive_channel
+
+    async def send(self, data: bytes) -> None:
+        await self.send_channel.send(data)
+
+    async def recv(self) -> bytes:
+        return await self.receive_channel.receive()
+
+    async def aclose(self) -> None:
+        await self.send_channel.aclose()
+        await self.receive_channel.aclose()
 
 
 class EndscopeConnection:
     def __init__(
-        self, meta_channel: UdpChannelInterface, vid_channel: UdpChannelInterface
+        self, meta_channel: AsyncDatagramChannel, vid_channel: AsyncDatagramChannel
     ):
         self.meta = meta_channel
         self.vid = vid_channel
 
-    def query_battery(self) -> float | None:
+    async def query_battery(self) -> float | None:
         data: bytes = "type=1001\x0a".encode()
-        self.meta.send(data)
-        reply = self.meta.recv()
+        await self.meta.send(data)
+        reply = await self.meta.recv()
         received_data: str = reply.decode()
         return get_battery_level(received_data)
 
-    def set_brightness(self, level: int) -> str:
+    async def set_brightness(self, level: int) -> str:
         data = f"type=1003&value={level}\x0a".encode()
-        self.meta.send(data)
-        reply = self.meta.recv()
+        await self.meta.send(data)
+        reply = await self.meta.recv()
         try:
             return reply.decode()
         except UnicodeDecodeError:
             return "UnicodeDecodeError"
 
-    def get_system_info(self) -> str:
+    async def get_system_info(self) -> str:
         data: bytes = "type=1002\x0a".encode()
-        self.meta.send(data)
-        reply = self.meta.recv()
+        await self.meta.send(data)
+        reply = await self.meta.recv()
         return reply.decode()
 
-    def start_video(self) -> None:
+    async def start_video(self) -> None:
         # three times according to captured traffic
         data = "\x20\x36\x00\x02".encode()
         for _ in range(3):
-            self.vid.send(data)
+            await self.vid.send(data)
 
-    def stop_video(self) -> None:
+    async def stop_video(self) -> None:
         data = "\x20\x37".encode()
-        self.vid.send(data)
+        await self.vid.send(data)
 
-    def recv_video(self) -> bytes:
-        return self.vid.recv()
+    async def recv_video(self) -> bytes:
+        return await self.vid.recv()
 
-    def close(self) -> None:
-        self.meta.close()
-        self.vid.close()
+    async def aclose(self) -> None:
+        await self.meta.aclose()
+        await self.vid.aclose()
 
 
 def get_battery_level(query_string: str) -> float | None:
@@ -162,46 +192,25 @@ def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
     return abs_frame
 
 
-def main() -> None:
-    debug = False
-    buffer_size = 1500
-    target_ip = "192.168.1.1"
-    target_port_meta = 61502
-    source_port_meta = 50262
-
-    target_port_vid = 61503
-    source_port_vid = 51320
-
-    # Initialize connection
-    meta_chan = UdpChannel(source_port_meta, target_ip, target_port_meta, buffer_size)
-    vid_chan = UdpChannel(source_port_vid, target_ip, target_port_vid, buffer_size)
-    vid_chan.set_timeout(5.0)
-    conn = EndscopeConnection(meta_chan, vid_chan)
-
+async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> None:
     brightness = 100
-
     win_name = "Video Stream"
     firstframe = True
 
     try:
         # get system info
-        received_data = conn.get_system_info()
+        received_data = await conn.get_system_info()
         print("Received data:", received_data)
-        # TODO: parse? Example:
-        # Received data: type=2002&protocol=2&w=640&h=480&fps=20&ratio=4:3&angle=270&hardware=V1.1&company=vitcoco&id=4e18d7c8054f5d209daaab4f5d200000&firmware=2030072618&ssid=softish-23840&dn=Y8&bl=30
 
-        battery_level: float | None = conn.query_battery()
+        battery_level: float | None = await conn.query_battery()
         print(f"Battery level: {battery_level}")
 
         # three times according to captured traffic
-        conn.start_video()
+        await conn.start_video()
 
         # set led brightness to 100%
-        received_data = conn.set_brightness(100)
+        received_data = await conn.set_brightness(100)
         print("Received data:", received_data)
-        # TODO: parse? Example:
-        # Received data: type=1003&value=100
-        # !@
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
@@ -213,7 +222,7 @@ def main() -> None:
         frame = 0
         part = 0
         pic_buf = b""
-        keep_awake_time = time.time()
+        keep_awake_time = trio.current_time()
 
         # Store received parts per frame
         # frame_number -> {part_number: pic_data}
@@ -223,7 +232,13 @@ def main() -> None:
 
         while True:
             # read video stream
-            reply = conn.recv_video()
+            with trio.move_on_after(5.0) as cancel_scope:
+                reply = await conn.recv_video()
+
+            if cancel_scope.cancelled_caught:
+                print("Video timeout")
+                break
+
             raw_frame = reply[0]
             frame_end: int = reply[1]
             part = reply[2]
@@ -348,10 +363,10 @@ def main() -> None:
                             f: parts_dict[f] for f in parts_dict if f >= frame
                         }
 
-                        if time.time() > keep_awake_time:
-                            keep_awake_time = time.time() + 10
+                        if trio.current_time() > keep_awake_time:
+                            keep_awake_time = trio.current_time() + 10
                             prev_battery_level = battery_level
-                            battery_level = conn.query_battery()
+                            battery_level = await conn.query_battery()
                             if prev_battery_level != battery_level:
                                 print(f"Battery level: {battery_level}")
 
@@ -388,24 +403,84 @@ def main() -> None:
             elif key == ord("+"):
                 if brightness < 100:
                     brightness += 10
-                    received_data = conn.set_brightness(brightness)
+                    received_data = await conn.set_brightness(brightness)
                     print("Received data:", received_data)
             elif key == ord("-"):
                 if brightness > 0:
                     brightness -= 10
-                    received_data = conn.set_brightness(brightness)
+                    received_data = await conn.set_brightness(brightness)
                     print("Received data:", received_data)
             elif key == ord("f"):
                 fullframe = not fullframe
             elif key == ord("d"):
                 debug = not debug
 
+            # Yield to trio
+            await trio.sleep(0.01)
+
     finally:
         # stop stream and close
-        conn.stop_video()
-        conn.close()
+        await conn.stop_video()
+        await conn.aclose()
         cv2.destroyAllWindows()
 
 
+async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fake", action="store_true", help="Use fake endscope device")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args()
+
+    buffer_size = 1500
+    target_ip = "192.168.1.1"
+    target_port_meta = 61502
+    source_port_meta = 50262
+    target_port_vid = 61503
+    source_port_vid = 51320
+
+    async with trio.open_nursery() as nursery:
+        if args.fake:
+            from fake_endscope import run_fake_device
+
+            # Create memory channels for fake communication
+            meta_tx: trio.MemorySendChannel
+            meta_rx: trio.MemoryReceiveChannel
+            meta_reply_tx: trio.MemorySendChannel
+            meta_reply_rx: trio.MemoryReceiveChannel
+            vid_tx: trio.MemorySendChannel
+            vid_rx: trio.MemoryReceiveChannel
+            vid_back_tx: trio.MemorySendChannel
+            vid_back_rx: trio.MemoryReceiveChannel
+
+            meta_tx, meta_rx = trio.open_memory_channel(10)
+            meta_reply_tx, meta_reply_rx = trio.open_memory_channel(10)
+            vid_tx, vid_rx = trio.open_memory_channel(10)
+            vid_back_tx, vid_back_rx = trio.open_memory_channel(10)
+
+            # Start fake device task
+            nursery.start_soon(
+                run_fake_device, meta_rx, meta_reply_tx, vid_back_rx, vid_tx
+            )
+
+            # Map to app channels
+            meta_chan = MemoryDatagramChannel(meta_tx, meta_reply_rx)
+            vid_chan = MemoryDatagramChannel(vid_back_tx, vid_rx)
+
+            conn = EndscopeConnection(meta_chan, vid_chan)
+        else:
+            async with TrioUdpChannel(
+                source_port_meta, target_ip, target_port_meta, buffer_size
+            ) as meta_chan:
+                async with TrioUdpChannel(
+                    source_port_vid, target_ip, target_port_vid, buffer_size
+                ) as vid_chan:
+                    conn = EndscopeConnection(meta_chan, vid_chan)
+                    await run_app(conn, buffer_size, args.debug)
+            return
+
+        await run_app(conn, buffer_size, args.debug)
+        nursery.cancel_scope.cancel()
+
+
 if __name__ == "__main__":
-    main()
+    trio.run(main)

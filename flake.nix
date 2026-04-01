@@ -21,6 +21,7 @@
           (ps.opencv4.override { enableGtk3 = true; })
           ps.numpy
           ps.pillow
+          ps.trio
         ];
         python-with-mypy = python.withPackages (
           ps:
