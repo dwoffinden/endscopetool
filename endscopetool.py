@@ -355,13 +355,11 @@ async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> No
                             cv2.resizeWindow(win_name, square_size, square_size)
                             firstframe = False
 
-                        # delete earlier frame data
+                        # delete earlier frame AND current frame data since we processed it
                         frames_dict = {
-                            f: frames_dict[f] for f in frames_dict if f >= frame
+                            f: frames_dict[f] for f in frames_dict if f > frame
                         }
-                        parts_dict = {
-                            f: parts_dict[f] for f in parts_dict if f >= frame
-                        }
+                        parts_dict = {f: parts_dict[f] for f in parts_dict if f > frame}
 
                         if trio.current_time() > keep_awake_time:
                             keep_awake_time = trio.current_time() + 10
@@ -373,50 +371,48 @@ async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> No
                     except OSError:
                         print("image corrupted")
 
-            # process UI events (e.g. window closing) and poll for a keypress
-            key = cv2.pollKey() & 0xFF
-            if key == ord("1"):
-                rotation_lock = True
-                rotation = 0
-            elif key == ord("2"):
-                rotation_lock = True
-                rotation = 90
-            elif key == ord("3"):
-                rotation_lock = True
-                rotation = 180
-            elif key == ord("4"):
-                rotation_lock = True
-                rotation = 270
-            elif key == ord("r"):
-                rotation_lock = False
-            elif (
-                key == ord("q")
-                or key == 27
-                or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
-            ):
-                print("window closed")
-                break
-            elif key == ord("w"):
-                with open("out.jpg", "wb") as fd:
-                    ret = fd.write(pic_buf)
-                print("Wrote " + str(ret) + " bytes to out.jpg")
-            elif key == ord("+"):
-                if brightness < 100:
-                    brightness += 10
-                    received_data = await conn.set_brightness(brightness)
-                    print("Received data:", received_data)
-            elif key == ord("-"):
-                if brightness > 0:
-                    brightness -= 10
-                    received_data = await conn.set_brightness(brightness)
-                    print("Received data:", received_data)
-            elif key == ord("f"):
-                fullframe = not fullframe
-            elif key == ord("d"):
-                debug = not debug
-
-            # Yield to trio
-            await trio.sleep(0.01)
+                    # process UI events (e.g. window closing) and poll for a keypress
+                    # we do this only when a frame is completely evaluated to save CPU!
+                    key = cv2.pollKey() & 0xFF
+                    if key == ord("1"):
+                        rotation_lock = True
+                        rotation = 0
+                    elif key == ord("2"):
+                        rotation_lock = True
+                        rotation = 90
+                    elif key == ord("3"):
+                        rotation_lock = True
+                        rotation = 180
+                    elif key == ord("4"):
+                        rotation_lock = True
+                        rotation = 270
+                    elif key == ord("r"):
+                        rotation_lock = False
+                    elif (
+                        key == ord("q")
+                        or key == 27
+                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
+                    ):
+                        print("window closed")
+                        break
+                    elif key == ord("w"):
+                        with open("out.jpg", "wb") as fd:
+                            ret = fd.write(pic_buf)
+                        print("Wrote " + str(ret) + " bytes to out.jpg")
+                    elif key == ord("+"):
+                        if brightness < 100:
+                            brightness += 10
+                            received_data = await conn.set_brightness(brightness)
+                            print("Received data:", received_data)
+                    elif key == ord("-"):
+                        if brightness > 0:
+                            brightness -= 10
+                            received_data = await conn.set_brightness(brightness)
+                            print("Received data:", received_data)
+                    elif key == ord("f"):
+                        fullframe = not fullframe
+                    elif key == ord("d"):
+                        debug = not debug
 
     finally:
         # stop stream and close

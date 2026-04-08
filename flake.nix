@@ -61,7 +61,7 @@
         packages.default = endscopetool;
         apps.default = {
           type = "app";
-          program = "${endscopetool}/bin/endscopetool";
+          program = "${endscopetool}/bin/endscope";
         };
         checks = {
           inherit pre-commit-check;
