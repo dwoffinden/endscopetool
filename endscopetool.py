@@ -21,6 +21,8 @@ from io import BytesIO
 from urllib.parse import parse_qs
 from typing import Protocol, runtime_checkable
 
+cv2.setNumThreads(1)
+
 
 @runtime_checkable
 class AsyncDatagramChannel(Protocol):
