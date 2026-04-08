@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-endscopetool = "endscopetool:main"
+endscope = "endscopetool:cli_main"
 
 [tool.setuptools]
-py-modules = ["endscopetool"]
+py-modules = ["endscopetool", "fake_endscope"]

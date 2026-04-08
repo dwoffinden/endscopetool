@@ -482,5 +482,9 @@ async def main() -> None:
         nursery.cancel_scope.cancel()
 
 
-if __name__ == "__main__":
+def cli_main() -> None:
     trio.run(main)
+
+
+if __name__ == "__main__":
+    cli_main()
