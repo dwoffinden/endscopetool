@@ -14,4 +14,4 @@ dependencies = [
 endscope = "endscopetool:cli_main"
 
 [tool.setuptools]
-py-modules = ["endscopetool", "fake_endscope"]
+py-modules = ["endscopetool", "fake_endscope", "transports"]

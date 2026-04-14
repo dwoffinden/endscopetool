@@ -19,77 +19,14 @@ import argparse
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
-from typing import Protocol, runtime_checkable
+from transports import AsyncDatagramTransport, UdpDatagramTransport
 
 cv2.setNumThreads(1)
 
 
-@runtime_checkable
-class AsyncDatagramChannel(Protocol):
-    async def send(self, data: bytes) -> None: ...
-
-    async def recv(self) -> bytes: ...
-
-    async def aclose(self) -> None: ...
-
-
-class TrioUdpChannel:
-    def __init__(
-        self, local_port: int, target_ip: str, target_port: int, buffer_size: int = 1500
-    ):
-        self.local_port = local_port
-        self.target_address = (target_ip, target_port)
-        self.buffer_size = buffer_size
-        self.sock: trio.socket.SocketType | None = None
-
-    async def __aenter__(self):
-        import trio.socket
-
-        self.sock = trio.socket.socket(trio.socket.AF_INET, trio.socket.SOCK_DGRAM)
-        await self.sock.bind(("0.0.0.0", self.local_port))
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.aclose()
-
-    async def send(self, data: bytes) -> None:
-        assert self.sock is not None
-        await self.sock.sendto(data, self.target_address)
-
-    async def recv(self) -> bytes:
-        assert self.sock is not None
-        data, _ = await self.sock.recvfrom(self.buffer_size)
-        return data
-
-    async def aclose(self) -> None:
-        if self.sock:
-            self.sock.close()
-            self.sock = None
-
-
-class MemoryDatagramChannel:
-    def __init__(
-        self,
-        send_channel: trio.MemorySendChannel,
-        receive_channel: trio.MemoryReceiveChannel,
-    ):
-        self.send_channel = send_channel
-        self.receive_channel = receive_channel
-
-    async def send(self, data: bytes) -> None:
-        await self.send_channel.send(data)
-
-    async def recv(self) -> bytes:
-        return await self.receive_channel.receive()
-
-    async def aclose(self) -> None:
-        await self.send_channel.aclose()
-        await self.receive_channel.aclose()
-
-
 class EndscopeConnection:
     def __init__(
-        self, meta_channel: AsyncDatagramChannel, vid_channel: AsyncDatagramChannel
+        self, meta_channel: AsyncDatagramTransport, vid_channel: AsyncDatagramTransport
     ):
         self.meta = meta_channel
         self.vid = vid_channel
@@ -438,46 +375,25 @@ async def main() -> None:
 
     async with trio.open_nursery() as nursery:
         if args.fake:
-            from fake_endscope import run_fake_device
+            from fake_endscope import start_fake_device
 
-            # Create memory channels for fake communication
-            meta_tx: trio.MemorySendChannel
-            meta_rx: trio.MemoryReceiveChannel
-            meta_reply_tx: trio.MemorySendChannel
-            meta_reply_rx: trio.MemoryReceiveChannel
-            vid_tx: trio.MemorySendChannel
-            vid_rx: trio.MemoryReceiveChannel
-            vid_back_tx: trio.MemorySendChannel
-            vid_back_rx: trio.MemoryReceiveChannel
-
-            meta_tx, meta_rx = trio.open_memory_channel(10)
-            meta_reply_tx, meta_reply_rx = trio.open_memory_channel(10)
-            vid_tx, vid_rx = trio.open_memory_channel(10)
-            vid_back_tx, vid_back_rx = trio.open_memory_channel(10)
-
-            # Start fake device task
-            nursery.start_soon(
-                run_fake_device, meta_rx, meta_reply_tx, vid_back_rx, vid_tx
-            )
-
-            # Map to app channels
-            meta_chan = MemoryDatagramChannel(meta_tx, meta_reply_rx)
-            vid_chan = MemoryDatagramChannel(vid_back_tx, vid_rx)
+            meta_chan, vid_chan = start_fake_device(nursery)
 
             conn = EndscopeConnection(meta_chan, vid_chan)
-        else:
-            async with TrioUdpChannel(
-                source_port_meta, target_ip, target_port_meta, buffer_size
-            ) as meta_chan:
-                async with TrioUdpChannel(
-                    source_port_vid, target_ip, target_port_vid, buffer_size
-                ) as vid_chan:
-                    conn = EndscopeConnection(meta_chan, vid_chan)
-                    await run_app(conn, buffer_size, args.debug)
-            return
 
-        await run_app(conn, buffer_size, args.debug)
-        nursery.cancel_scope.cancel()
+            await run_app(conn, buffer_size, args.debug)
+            nursery.cancel_scope.cancel()
+        else:
+            async with (
+                UdpDatagramTransport(
+                    source_port_meta, target_ip, target_port_meta, buffer_size
+                ) as meta_chan,
+                UdpDatagramTransport(
+                    source_port_vid, target_ip, target_port_vid, buffer_size
+                ) as vid_chan,
+            ):
+                conn = EndscopeConnection(meta_chan, vid_chan)
+                await run_app(conn, buffer_size, args.debug)
 
 
 def cli_main() -> None:

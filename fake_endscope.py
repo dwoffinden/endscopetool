@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from io import BytesIO
+from transports import MemoryDatagramTransport
 
 
 class FakeEndscope:
@@ -147,3 +148,35 @@ class FakeEndscope:
 async def run_fake_device(meta_receive, meta_send, vid_receive, vid_send):
     device = FakeEndscope(meta_receive, meta_send, vid_receive, vid_send)
     await device.run()
+
+
+def start_fake_device(
+    nursery: trio.Nursery,
+) -> tuple[
+    MemoryDatagramTransport,
+    MemoryDatagramTransport,
+]:
+    """
+    Creates memory channels and starts the fake device task in the given nursery.
+    Returns the transports needed by the application (meta_transport, vid_transport).
+    """
+    meta_tx: trio.MemorySendChannel
+    meta_rx: trio.MemoryReceiveChannel
+    meta_reply_tx: trio.MemorySendChannel
+    meta_reply_rx: trio.MemoryReceiveChannel
+    vid_tx: trio.MemorySendChannel
+    vid_rx: trio.MemoryReceiveChannel
+    vid_back_tx: trio.MemorySendChannel
+    vid_back_rx: trio.MemoryReceiveChannel
+
+    meta_tx, meta_rx = trio.open_memory_channel(10)
+    meta_reply_tx, meta_reply_rx = trio.open_memory_channel(10)
+    vid_tx, vid_rx = trio.open_memory_channel(10)
+    vid_back_tx, vid_back_rx = trio.open_memory_channel(10)
+
+    nursery.start_soon(run_fake_device, meta_rx, meta_reply_tx, vid_back_rx, vid_tx)
+
+    meta_transport = MemoryDatagramTransport(meta_tx, meta_reply_rx)
+    vid_transport = MemoryDatagramTransport(vid_back_tx, vid_rx)
+
+    return meta_transport, vid_transport
