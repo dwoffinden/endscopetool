@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from io import BytesIO
+from urllib.parse import parse_qs
 from transports import MemoryDatagramTransport
 
 
@@ -41,11 +42,15 @@ class FakeEndscope:
                 await reply_channel.send(reply)
         elif cmd_str.startswith("type=1003"):  # brightness
             try:
-                val = int(cmd_str.split("value=")[1].strip())
-                self.brightness = val
+                params = parse_qs(cmd_str)
+                val_str = params["value"][0]
+                self.brightness = int(val_str)
+                # real device pads 1-3 char value to 4 using \n, and appends load of aa bytes
                 if reply_channel:
-                    await reply_channel.send(b"OK\x0a")
-            except (IndexError, ValueError):
+                    val_padded = val_str + "\n" * (4 - len(val_str))
+                    reply = f"type=1003&value={val_padded}".encode() + (b"\xaa" * 32)
+                    await reply_channel.send(reply)
+            except (KeyError, IndexError, ValueError):
                 pass
         elif data == b"\x20\x36\x00\x02":  # start video
             print("FAKE: Video Started")

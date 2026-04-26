@@ -23,6 +23,8 @@ from transports import AsyncDatagramTransport, UdpDatagramTransport
 
 cv2.setNumThreads(1)
 
+debug = False
+
 
 class EndscopeConnection:
     def __init__(
@@ -38,14 +40,17 @@ class EndscopeConnection:
         received_data: str = reply.decode()
         return get_battery_level(received_data)
 
-    async def set_brightness(self, level: int) -> str:
+    async def set_brightness(self, level: int) -> int | None:
         data = f"type=1003&value={level}\x0a".encode()
         await self.meta.send(data)
         reply = await self.meta.recv()
+        if debug:
+            print(f"brightness response: {reply.hex(' ')}")
         try:
-            return reply.decode()
-        except UnicodeDecodeError:
-            return "UnicodeDecodeError"
+            params = parse_qs(reply.rstrip(b"\xaa").decode())
+            return int(params["value"][0])
+        except (KeyError, IndexError, ValueError):
+            return None
 
     async def get_system_info(self) -> str:
         data: bytes = "type=1002\x0a".encode()
@@ -73,7 +78,7 @@ class EndscopeConnection:
 def get_battery_level(query_string: str) -> float | None:
     """
     Extracts the battery level from a string like 'type=2001&data=23'.
-    Returns an integer or None if not found or invalid.
+    Returns an float in the range 0-1, or None if not found or invalid.
     """
     try:
         params = parse_qs(query_string)
@@ -130,10 +135,11 @@ def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
     return abs_frame
 
 
-async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> None:
+async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
     brightness = 100
     win_name = "Video Stream"
     firstframe = True
+    global debug
 
     try:
         # get system info
@@ -147,8 +153,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> No
         await conn.start_video()
 
         # set led brightness to 100%
-        received_data = await conn.set_brightness(100)
-        print("Received data:", received_data)
+        print("Brightness: ", await conn.set_brightness(100))
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
@@ -340,13 +345,11 @@ async def run_app(conn: EndscopeConnection, buffer_size: int, debug: bool) -> No
                     elif key == ord("+"):
                         if brightness < 100:
                             brightness += 10
-                            received_data = await conn.set_brightness(brightness)
-                            print("Received data:", received_data)
+                            print("Brightness: ", await conn.set_brightness(brightness))
                     elif key == ord("-"):
                         if brightness > 0:
                             brightness -= 10
-                            received_data = await conn.set_brightness(brightness)
-                            print("Received data:", received_data)
+                            print("Brightness: ", await conn.set_brightness(brightness))
                     elif key == ord("f"):
                         fullframe = not fullframe
                     elif key == ord("d"):
@@ -372,6 +375,9 @@ async def main() -> None:
     target_port_vid = 61503
     source_port_vid = 51320
 
+    global debug
+    debug = args.debug
+
     async with trio.open_nursery() as nursery:
         if args.fake:
             from fake_endscope import start_fake_device
@@ -380,7 +386,7 @@ async def main() -> None:
 
             conn = EndscopeConnection(meta_chan, vid_chan)
 
-            await run_app(conn, buffer_size, args.debug)
+            await run_app(conn, buffer_size)
             nursery.cancel_scope.cancel()
         else:
             async with (
@@ -392,7 +398,7 @@ async def main() -> None:
                 ) as vid_chan,
             ):
                 conn = EndscopeConnection(meta_chan, vid_chan)
-                await run_app(conn, buffer_size, args.debug)
+                await run_app(conn, buffer_size)
 
 
 def cli_main() -> None:
