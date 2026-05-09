@@ -157,6 +157,43 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
+        # Build help image once
+        help_lines = [
+            "Keyboard shortcuts:",
+            "",
+            "  1/2/3/4  Lock rotation 0/90/180/270",
+            "  r        Unlock rotation (use sensor)",
+            "  +/-      Brightness up/down 10%",
+            "  f        Toggle full frame / circle",
+            "  w        Save snapshot to out.jpg",
+            "  d        Toggle debug output",
+            "  h        Toggle this help",
+            "  q / Esc  Quit",
+            "",
+            "Click either window to toggle this help.",
+        ]
+        help_font = cv2.FONT_HERSHEY_DUPLEX
+        help_scale = 0.7
+        help_thickness = 1
+        help_padding = 20
+        help_line_h = 32
+        help_img_h = help_line_h * len(help_lines) + help_padding * 2
+        help_img_w = 560
+        help_img = np.zeros((help_img_h, help_img_w, 3), dtype=np.uint8)
+        for i, line in enumerate(help_lines):
+            color = (255, 255, 255) if i == 0 else (180, 180, 180)
+            cv2.putText(help_img, line, (help_padding, help_padding + 20 + i * help_line_h),
+                        help_font, help_scale, color, help_thickness, cv2.LINE_AA)
+        help_win = "Help"
+        help_visible = False
+
+        # Mouse callback: any click toggles help window
+        mouse_clicked = [False]
+        def on_mouse(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                mouse_clicked[0] = True
+        cv2.setMouseCallback(win_name, on_mouse)
+
         rotation_lock = False
         rotation = 0
         fullframe = False
@@ -340,6 +377,19 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     # process UI events (e.g. window closing) and poll for a keypress
                     # we do this only when a frame is completely evaluated to save CPU!
                     key = cv2.pollKey() & 0xFF
+
+                    # Toggle help window on mouse click
+                    if mouse_clicked[0]:
+                        mouse_clicked[0] = False
+                        if help_visible:
+                            cv2.destroyWindow(help_win)
+                            help_visible = False
+                        else:
+                            cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
+                            cv2.imshow(help_win, help_img)
+                            cv2.setMouseCallback(help_win, on_mouse)
+                            help_visible = True
+
                     if key == ord("1"):
                         rotation_lock = True
                         rotation = 0
@@ -377,6 +427,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         fullframe = not fullframe
                     elif key == ord("d"):
                         debug = not debug
+                    elif key == ord("h"):
+                        mouse_clicked[0] = True  # reuse toggle logic
 
     finally:
         # stop stream and close
