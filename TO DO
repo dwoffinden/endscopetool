@@ -4,4 +4,4 @@
 
 - ~~Resize window without stretching~~ (fixed: letterbox via getWindowImageRect; macOS preserves AR natively, Windows was stretching)
 - ~~GUI Buttons?  GUI help?~~ (done: click or 'h' toggles help window with all key shortcuts)
-- Snapshots unique file names.
+- ~~Snapshots unique file names.~~ (done: timestamped snapshot_YYYYMMDD_HHMMSS.jpg; saves raw camera JPEG, no re-encoding)

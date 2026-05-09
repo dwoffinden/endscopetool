@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 import trio
 import argparse
+from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
@@ -165,7 +166,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
             "  r        Unlock rotation (use sensor)",
             "  +/-      Brightness up/down 10%",
             "  f        Toggle full frame / circle",
-            "  w        Save snapshot to out.jpg",
+            "  w        Save snapshot (timestamped .jpg)",
             "  d        Toggle debug output",
             "  h        Toggle this help",
             "  q / Esc  Quit",
@@ -412,9 +413,10 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         print("window closed")
                         break
                     elif key == ord("w"):
-                        with open("out.jpg", "wb") as fd:
+                        filename = datetime.now().strftime("snapshot_%Y%m%d_%H%M%S.jpg")
+                        with open(filename, "wb") as fd:
                             ret = fd.write(pic_buf)
-                        print("Wrote " + str(ret) + " bytes to out.jpg")
+                        print("Wrote " + str(ret) + " bytes to " + filename)
                     elif key == ord("+"):
                         if brightness < 100:
                             brightness += 10
