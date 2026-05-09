@@ -413,7 +413,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         print("window closed")
                         break
                     elif key == ord("w"):
-                        filename = datetime.now().strftime("snapshot_%Y%m%d_%H%M%S.jpg")
+                        now = datetime.now()
+                        filename = now.strftime("snapshot_%Y%m%d_%H%M%S_") + f"{now.microsecond // 10000:02d}.jpg"
                         with open(filename, "wb") as fd:
                             ret = fd.write(pic_buf)
                         print("Wrote " + str(ret) + " bytes to " + filename)
