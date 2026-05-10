@@ -183,16 +183,26 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         help_img = np.zeros((help_img_h, help_img_w, 3), dtype=np.uint8)
         for i, line in enumerate(help_lines):
             color = (255, 255, 255) if i == 0 else (180, 180, 180)
-            cv2.putText(help_img, line, (help_padding, help_padding + 20 + i * help_line_h),
-                        help_font, help_scale, color, help_thickness, cv2.LINE_AA)
+            cv2.putText(
+                help_img,
+                line,
+                (help_padding, help_padding + 20 + i * help_line_h),
+                help_font,
+                help_scale,
+                color,
+                help_thickness,
+                cv2.LINE_AA,
+            )
         help_win = "Help"
         help_visible = False
 
         # Mouse callback: any click toggles help window
         mouse_clicked = [False]
+
         def on_mouse(event, x, y, flags, param):
             if event == cv2.EVENT_LBUTTONDOWN:
                 mouse_clicked[0] = True
+
         cv2.setMouseCallback(win_name, on_mouse)
 
         rotation_lock = False
@@ -343,16 +353,23 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         if win_w > 0 and win_h > 0:
                             fit = min(win_w, win_h)
                             if fit != square_size:
-                                image_to_show = cv2.resize(image_to_show, (fit, fit), interpolation=cv2.INTER_LINEAR)
+                                image_to_show = cv2.resize(
+                                    image_to_show,
+                                    (fit, fit),
+                                    interpolation=cv2.INTER_LINEAR,
+                                )
                             if win_w != win_h:
                                 # Pad the shorter axis with black to fill the window
                                 pad_w = win_w - fit
                                 pad_h = win_h - fit
                                 image_to_show = cv2.copyMakeBorder(
                                     image_to_show,
-                                    pad_h // 2, pad_h - pad_h // 2,
-                                    pad_w // 2, pad_w - pad_w // 2,
-                                    cv2.BORDER_CONSTANT, value=(0, 0, 0)
+                                    pad_h // 2,
+                                    pad_h - pad_h // 2,
+                                    pad_w // 2,
+                                    pad_w - pad_w // 2,
+                                    cv2.BORDER_CONSTANT,
+                                    value=(0, 0, 0),
                                 )
                         cv2.imshow(win_name, image_to_show)
                         if firstframe:
@@ -414,7 +431,10 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         break
                     elif key == ord("w"):
                         now = datetime.now()
-                        filename = now.strftime("snapshot_%Y%m%d_%H%M%S_") + f"{now.microsecond // 10000:02d}.jpg"
+                        filename = (
+                            now.strftime("snapshot_%Y%m%d_%H%M%S_")
+                            + f"{now.microsecond // 10000:02d}.jpg"
+                        )
                         with open(filename, "wb") as fd:
                             ret = fd.write(pic_buf)
                         print("Wrote " + str(ret) + " bytes to " + filename)
