@@ -425,7 +425,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     elif (
                         key == ord("q")
                         or key == 27
-                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 1
+                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) == 0
+                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
                     ):
                         print("window closed")
                         break
