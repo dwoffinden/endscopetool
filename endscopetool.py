@@ -13,9 +13,11 @@
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
 
 import cv2
+import sys
 import numpy as np
 import trio
 import argparse
+from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
@@ -157,6 +159,53 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
+        # Build help image once
+        help_lines = [
+            "Keyboard shortcuts:",
+            "",
+            "  1/2/3/4  Lock rotation 0/90/180/270",
+            "  r        Unlock rotation (use sensor)",
+            "  +/-      Brightness up/down 10%",
+            "  f        Toggle full frame / circle",
+            "  w        Save snapshot (timestamped .jpg)",
+            "  d        Toggle debug output",
+            "  h        Toggle this help",
+            "  q / Esc  Quit",
+            "",
+            "Click either window to toggle this help.",
+        ]
+        help_font = cv2.FONT_HERSHEY_DUPLEX
+        help_scale = 0.7
+        help_thickness = 1
+        help_padding = 20
+        help_line_h = 32
+        help_img_h = help_line_h * len(help_lines) + help_padding * 2
+        help_img_w = 560
+        help_img = np.zeros((help_img_h, help_img_w, 3), dtype=np.uint8)
+        for i, line in enumerate(help_lines):
+            color = (255, 255, 255) if i == 0 else (180, 180, 180)
+            cv2.putText(
+                help_img,
+                line,
+                (help_padding, help_padding + 20 + i * help_line_h),
+                help_font,
+                help_scale,
+                color,
+                help_thickness,
+                cv2.LINE_AA,
+            )
+        help_win = "Help"
+        help_visible = False
+
+        # Mouse callback: any click toggles help window
+        mouse_clicked = [False]
+
+        def on_mouse(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                mouse_clicked[0] = True
+
+        cv2.setMouseCallback(win_name, on_mouse)
+
         rotation_lock = False
         rotation = 0
         fullframe = False
@@ -293,6 +342,37 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                                 level=battery_level,
                                 thickness=square_size // 200,
                             )
+                        # Fit image_to_show into the current window size, preserving aspect ratio.
+                        # On macOS (WINDOW_GUI_NORMAL), the backend already preserves aspect ratio
+                        # on window resize, and getWindowImageRect always returns the native image
+                        # size — so this block is a no-op there.
+                        # On Windows, the backend stretches the image to fill the window, and
+                        # getWindowImageRect reflects the actual stretched display dimensions —
+                        # so we resize to fit the smaller dimension and pad the rest with black.
+                        if sys.platform == "win32":
+                            rect = cv2.getWindowImageRect(win_name)
+                            win_w, win_h = rect[2], rect[3]
+                            if win_w > 0 and win_h > 0:
+                                fit = min(win_w, win_h)
+                                if fit != square_size:
+                                    image_to_show = cv2.resize(
+                                        image_to_show,
+                                        (fit, fit),
+                                        interpolation=cv2.INTER_LINEAR,
+                                    )
+                                if win_w != win_h:
+                                    # Pad the shorter axis with black to fill the window
+                                    pad_w = win_w - fit
+                                    pad_h = win_h - fit
+                                    image_to_show = cv2.copyMakeBorder(
+                                        image_to_show,
+                                        pad_h // 2,
+                                        pad_h - pad_h // 2,
+                                        pad_w // 2,
+                                        pad_w - pad_w // 2,
+                                        cv2.BORDER_CONSTANT,
+                                        value=(0, 0, 0),
+                                    )
                         cv2.imshow(win_name, image_to_show)
                         if firstframe:
                             cv2.resizeWindow(win_name, square_size, square_size)
@@ -317,6 +397,19 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     # process UI events (e.g. window closing) and poll for a keypress
                     # we do this only when a frame is completely evaluated to save CPU!
                     key = cv2.pollKey() & 0xFF
+
+                    # Toggle help window on mouse click
+                    if mouse_clicked[0]:
+                        mouse_clicked[0] = False
+                        if help_visible:
+                            cv2.destroyWindow(help_win)
+                            help_visible = False
+                        else:
+                            cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
+                            cv2.imshow(help_win, help_img)
+                            cv2.setMouseCallback(help_win, on_mouse)
+                            help_visible = True
+
                     if key == ord("1"):
                         rotation_lock = True
                         rotation = 0
@@ -334,14 +427,20 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     elif (
                         key == ord("q")
                         or key == 27
+                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) == 0
                         or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
                     ):
                         print("window closed")
                         break
                     elif key == ord("w"):
-                        with open("out.jpg", "wb") as fd:
+                        now = datetime.now()
+                        filename = (
+                            now.strftime("snapshot_%Y%m%d_%H%M%S_")
+                            + f"{now.microsecond // 10000:02d}.jpg"
+                        )
+                        with open(filename, "wb") as fd:
                             ret = fd.write(pic_buf)
-                        print("Wrote " + str(ret) + " bytes to out.jpg")
+                        print("Wrote " + str(ret) + " bytes to " + filename)
                     elif key == ord("+"):
                         if brightness < 100:
                             brightness += 10
@@ -354,6 +453,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         fullframe = not fullframe
                     elif key == ord("d"):
                         debug = not debug
+                    elif key == ord("h"):
+                        mouse_clicked[0] = True  # reuse toggle logic
 
     finally:
         # stop stream and close
