@@ -28,6 +28,36 @@ cv2.setNumThreads(1)
 debug = False
 
 
+def _is_window_closed(win_name: str) -> bool:
+    """Return True iff the OpenCV window has been destroyed by the user.
+
+    Detection is based on ``cv2.getWindowProperty(..., WND_PROP_VISIBLE)``,
+    which behaves differently per HighGUI backend:
+
+    * Windows: raises ``cv2.error`` after the window is destroyed.
+    * Linux/Wayland (Hyprland at least): returns ``-1`` after destroy.
+    * macOS (Cocoa): close button is disabled with ``WINDOW_GUI_NORMAL``,
+      so destroy is unreachable. While the window is alive, the property
+      returns ``1`` when visible and ``0`` when minimized.
+
+    A negative value (or a raise) uniquely identifies the closed state
+    across all three backends, while minimize stays non-negative. Prior
+    checks that also used ``WND_PROP_AUTOSIZE == -1`` were incorrect:
+    AUTOSIZE describes the window's resize mode, not a lifecycle state,
+    and on macOS it is unconditionally ``-1`` from frame one.
+    """
+    try:
+        return (
+            cv2.getWindowProperty(
+                win_name,
+                cv2.WND_PROP_VISIBLE,
+            )
+            < 0
+        )
+    except cv2.error:
+        return True
+
+
 class EndscopeConnection:
     def __init__(
         self, meta_channel: AsyncDatagramTransport, vid_channel: AsyncDatagramTransport
@@ -223,6 +253,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         parts_dict: dict[int, int] = {}
 
         while True:
+          try:  # intentional 2-space indent — body stays at col 12 (hack to keep diff minimal)
             # read video stream
             with trio.move_on_after(5.0) as cancel_scope:
                 reply = await conn.recv_video()
@@ -426,13 +457,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         rotation = 270
                     elif key == ord("r"):
                         rotation_lock = False
-                    elif (
-                        key == ord("q")
-                        or key == 27
-                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) == 0
-                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
-                    ):
-                        print("window closed")
+                    elif key == ord("q") or key == 27:
+                        print("user quit")
                         break
                     elif key == ord("w"):
                         now = datetime.now()
@@ -461,6 +487,19 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         debug = not debug
                     elif key == ord("h"):
                         mouse_clicked[0] = True  # reuse toggle logic
+
+          except cv2.error as e:  # 2-space indent — matches the try above
+            # Any cv2 window call (imshow, getWindowProperty, resizeWindow,
+            # destroyWindow) can raise once the user destroys the window.
+            # If the helper confirms the main window is gone, exit cleanly;
+            # otherwise re-raise so genuine bugs still surface.
+            # Print the error either way so an unrelated cv2.error that
+            # happens to coincide with a destroyed window is still visible.
+            print(f"cv2.error: {e}")
+            if _is_window_closed(win_name):
+                print("window closed")
+                break
+            raise
 
     finally:
         # stop stream and close
