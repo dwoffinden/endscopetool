@@ -31,31 +31,27 @@ debug = False
 def _is_window_closed(win_name: str) -> bool:
     """Return True iff the OpenCV window has been destroyed by the user.
 
-    Detection is based on ``cv2.getWindowProperty(..., WND_PROP_VISIBLE)``,
-    which behaves differently per HighGUI backend:
-
-    * Windows: raises ``cv2.error`` after the window is destroyed.
-    * Linux/Wayland (Hyprland at least): returns ``-1`` after destroy.
-    * macOS (Cocoa): close button is disabled with ``WINDOW_GUI_NORMAL``,
-      so destroy is unreachable. While the window is alive, the property
-      returns ``1`` when visible and ``0`` when minimized.
-
-    A negative value (or a raise) uniquely identifies the closed state
-    across all three backends, while minimize stays non-negative. Prior
-    checks that also used ``WND_PROP_AUTOSIZE == -1`` were incorrect:
-    AUTOSIZE describes the window's resize mode, not a lifecycle state,
-    and on macOS it is unconditionally ``-1`` from frame one.
+    Uses two independent checks so either can be removed if the API
+    changes or a backend behaves differently.
     """
+    # Raises on Windows after destroy (NULL HWND).
     try:
-        return (
-            cv2.getWindowProperty(
-                win_name,
-                cv2.WND_PROP_VISIBLE,
-            )
-            < 0
+        cv2.getWindowImageRect(win_name)
+    except cv2.error:
+        return True
+
+    # Returns -1 on Linux/Wayland after destroy (no raise there).
+    try:
+        vis = cv2.getWindowProperty(
+            win_name,
+            cv2.WND_PROP_VISIBLE,
         )
     except cv2.error:
         return True
+    if vis < 0:
+        return True
+
+    return False
 
 
 class EndscopeConnection:
