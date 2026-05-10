@@ -40,7 +40,7 @@ def _is_window_closed(win_name: str) -> bool:
     except cv2.error:
         return True
 
-    # Returns -1 on Linux/Wayland after destroy (no raise there).
+    # Returns -1 on Linux/Wayland after destroy (in case no raise there).
     try:
         vis = cv2.getWindowProperty(
             win_name,
@@ -426,6 +426,10 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     # process UI events (e.g. window closing) and poll for a keypress
                     # we do this only when a frame is completely evaluated to save CPU!
                     key = cv2.pollKey() & 0xFF
+
+                    # Sync help_visible in case user closed help via window chrome
+                    if help_visible and _is_window_closed(help_win):
+                        help_visible = False
 
                     # Toggle help window on mouse click
                     if mouse_clicked[0]:
