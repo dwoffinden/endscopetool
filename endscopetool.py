@@ -349,6 +349,8 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         # On Windows, the backend stretches the image to fill the window, and
                         # getWindowImageRect reflects the actual stretched display dimensions —
                         # so we resize to fit the smaller dimension and pad the rest with black.
+                        # On Linux, at least Wayland, the backend also preserves aspect ratio, but
+                        # resizing is async so this block is better off skipped.
                         if sys.platform == "win32":
                             rect = cv2.getWindowImageRect(win_name)
                             win_w, win_h = rect[2], rect[3]
@@ -440,15 +442,19 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         )
                         with open(filename, "wb") as fd:
                             ret = fd.write(pic_buf)
-                        print("Wrote " + str(ret) + " bytes to " + filename)
+                        print(f"Wrote {ret} bytes to {filename}")
                     elif key == ord("+"):
                         if brightness < 100:
                             brightness += 10
-                            print("Brightness: ", await conn.set_brightness(brightness))
+                            print(
+                                f"Brightness: {await conn.set_brightness(brightness)}"
+                            )
                     elif key == ord("-"):
                         if brightness > 0:
                             brightness -= 10
-                            print("Brightness: ", await conn.set_brightness(brightness))
+                            print(
+                                f"Brightness: {await conn.set_brightness(brightness)}"
+                            )
                     elif key == ord("f"):
                         fullframe = not fullframe
                     elif key == ord("d"):
