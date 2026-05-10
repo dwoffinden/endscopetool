@@ -13,6 +13,7 @@
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
 
 import cv2
+import sys
 import numpy as np
 import trio
 import argparse
@@ -348,29 +349,30 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         # On Windows, the backend stretches the image to fill the window, and
                         # getWindowImageRect reflects the actual stretched display dimensions —
                         # so we resize to fit the smaller dimension and pad the rest with black.
-                        rect = cv2.getWindowImageRect(win_name)
-                        win_w, win_h = rect[2], rect[3]
-                        if win_w > 0 and win_h > 0:
-                            fit = min(win_w, win_h)
-                            if fit != square_size:
-                                image_to_show = cv2.resize(
-                                    image_to_show,
-                                    (fit, fit),
-                                    interpolation=cv2.INTER_LINEAR,
-                                )
-                            if win_w != win_h:
-                                # Pad the shorter axis with black to fill the window
-                                pad_w = win_w - fit
-                                pad_h = win_h - fit
-                                image_to_show = cv2.copyMakeBorder(
-                                    image_to_show,
-                                    pad_h // 2,
-                                    pad_h - pad_h // 2,
-                                    pad_w // 2,
-                                    pad_w - pad_w // 2,
-                                    cv2.BORDER_CONSTANT,
-                                    value=(0, 0, 0),
-                                )
+                        if sys.platform == "win32":
+                            rect = cv2.getWindowImageRect(win_name)
+                            win_w, win_h = rect[2], rect[3]
+                            if win_w > 0 and win_h > 0:
+                                fit = min(win_w, win_h)
+                                if fit != square_size:
+                                    image_to_show = cv2.resize(
+                                        image_to_show,
+                                        (fit, fit),
+                                        interpolation=cv2.INTER_LINEAR,
+                                    )
+                                if win_w != win_h:
+                                    # Pad the shorter axis with black to fill the window
+                                    pad_w = win_w - fit
+                                    pad_h = win_h - fit
+                                    image_to_show = cv2.copyMakeBorder(
+                                        image_to_show,
+                                        pad_h // 2,
+                                        pad_h - pad_h // 2,
+                                        pad_w // 2,
+                                        pad_w - pad_w // 2,
+                                        cv2.BORDER_CONSTANT,
+                                        value=(0, 0, 0),
+                                    )
                         cv2.imshow(win_name, image_to_show)
                         if firstframe:
                             cv2.resizeWindow(win_name, square_size, square_size)
