@@ -83,6 +83,7 @@
               };
               ruff.enable = true;
               ruff-format.enable = true;
+              yamlfmt.enable = true;
               flint = {
                 enable = true;
                 name = "flint";
