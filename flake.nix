@@ -83,7 +83,10 @@
               };
               ruff.enable = true;
               ruff-format.enable = true;
-              yamlfmt.enable = true;
+              yamlfmt = {
+                enable = true;
+                settings.lint-only = false;
+              };
               flint = {
                 enable = true;
                 name = "flint";
