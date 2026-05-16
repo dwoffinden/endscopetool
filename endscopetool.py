@@ -208,7 +208,9 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 help_thickness,
                 cv2.LINE_AA,
             )
-        help_win = "Help"
+        help_win_base = "Help"
+        help_win = help_win_base
+        help_win_counter = 0
         help_visible = False
 
         # Mouse callback: any click toggles help window
@@ -434,10 +436,20 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         if mouse_clicked[0]:
                             mouse_clicked[0] = False
                             if help_visible:
-                                cv2.destroyWindow(help_win)
+                                try:
+                                    cv2.destroyWindow(help_win)
+                                except cv2.error:
+                                    pass
                                 help_visible = False
                             else:
+                                # Use a unique name for the help window to avoid issues when
+                                # closing the window natively on the GTK backend. If we quickly
+                                # relaunch, or query _is_window_closed, while the backend is
+                                # still asynchronously tearing down the window, we can segfault.
+                                help_win_counter += 1
+                                help_win = f"{help_win_base}_{help_win_counter}"
                                 cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
+                                cv2.setWindowTitle(help_win, "Help")
                                 cv2.imshow(help_win, help_img)
                                 cv2.setMouseCallback(help_win, on_mouse)
                                 help_visible = True
