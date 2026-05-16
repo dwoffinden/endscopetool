@@ -215,7 +215,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         mouse_clicked = [False]
 
         def on_mouse(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN:
+            if event == cv2.EVENT_LBUTTONUP:
                 mouse_clicked[0] = True
 
         cv2.setMouseCallback(win_name, on_mouse)
