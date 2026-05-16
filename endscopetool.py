@@ -151,6 +151,81 @@ def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
     return abs_frame
 
 
+def render_image(
+    pic_buf: bytes, fullframe: bool, rotation: int
+) -> tuple[cv2.typing.MatLike, int]:
+    """Render the image buffer, applying mask, rotation, and cropping or padding."""
+    image = Image.open(BytesIO(pic_buf))
+    image_np = np.array(image)
+    image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    num_rows, num_cols = image_cv.shape[:2]
+
+    if not fullframe:
+        # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
+        square_size = min(num_rows, num_cols)
+
+        # Create a circular mask on the original image dimensions
+        mask = np.zeros((num_rows, num_cols), np.uint8)
+        cv2.circle(
+            mask,
+            (num_cols // 2, num_rows // 2),
+            square_size // 2,
+            255,
+            -1,
+        )
+        image_masked = cv2.bitwise_and(image_cv, image_cv, mask=mask)
+
+        # Get rotation matrix for the original image
+        rotation_matrix = cv2.getRotationMatrix2D(
+            (num_cols / 2, num_rows / 2), rotation + 90, 1
+        )
+        # Rotate the masked image within its original frame
+        image_rotated = cv2.warpAffine(
+            image_masked, rotation_matrix, (num_cols, num_rows)
+        )
+
+        # Crop the center square from the rotated image
+        center_x, center_y = num_cols // 2, num_rows // 2
+        half_size = square_size // 2
+        image_to_show = image_rotated[
+            center_y - half_size : center_y + half_size,
+            center_x - half_size : center_x + half_size,
+        ]
+
+    else:
+        # Case 2: Full frame, ensuring no corners are ever cropped.
+        # The window will be a square with side length equal to the image diagonal.
+
+        # Calculate the length of the image diagonal
+        diagonal = np.sqrt(num_cols**2 + num_rows**2)
+
+        # The new square size is the diagonal, rounded up to the nearest integer
+        square_size = int(np.ceil(diagonal))
+
+        # Get the rotation matrix centered on the original image
+        rotation_matrix = cv2.getRotationMatrix2D(
+            (num_cols / 2, num_rows / 2), rotation + 90, 1
+        )
+
+        # Adjust the matrix's translation component to center the image on the new, larger canvas
+        tx = (square_size - num_cols) / 2
+        ty = (square_size - num_rows) / 2
+        rotation_matrix[0, 2] += tx
+        rotation_matrix[1, 2] += ty
+
+        # Warp the original image onto the new square canvas
+        image_to_show = cv2.warpAffine(
+            image_cv,
+            rotation_matrix,
+            (square_size, square_size),
+        )
+
+    if debug:
+        print(f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}")
+
+    return image_to_show, square_size
+
+
 async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
     brightness = 100
     win_name = "Video Stream"
@@ -280,76 +355,9 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         pic_buf = b"".join(parts[i] for i in range(num_parts))
 
                         try:
-                            image = Image.open(BytesIO(pic_buf))
-                            image_np = np.array(image)
-                            image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-                            num_rows, num_cols = image_cv.shape[:2]
-
-                            if not fullframe:
-                                # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
-                                square_size = min(num_rows, num_cols)
-
-                                # Create a circular mask on the original image dimensions
-                                mask = np.zeros((num_rows, num_cols), np.uint8)
-                                cv2.circle(
-                                    mask,
-                                    (num_cols // 2, num_rows // 2),
-                                    square_size // 2,
-                                    255,
-                                    -1,
-                                )
-                                image_masked = cv2.bitwise_and(
-                                    image_cv, image_cv, mask=mask
-                                )
-
-                                # Get rotation matrix for the original image
-                                rotation_matrix = cv2.getRotationMatrix2D(
-                                    (num_cols / 2, num_rows / 2), rotation + 90, 1
-                                )
-                                # Rotate the masked image within its original frame
-                                image_rotated = cv2.warpAffine(
-                                    image_masked, rotation_matrix, (num_cols, num_rows)
-                                )
-
-                                # Crop the center square from the rotated image
-                                center_x, center_y = num_cols // 2, num_rows // 2
-                                half_size = square_size // 2
-                                image_to_show = image_rotated[
-                                    center_y - half_size : center_y + half_size,
-                                    center_x - half_size : center_x + half_size,
-                                ]
-
-                            else:
-                                # Case 2: Full frame, ensuring no corners are ever cropped.
-                                # The window will be a square with side length equal to the image diagonal.
-
-                                # Calculate the length of the image diagonal
-                                diagonal = np.sqrt(num_cols**2 + num_rows**2)
-
-                                # The new square size is the diagonal, rounded up to the nearest integer
-                                square_size = int(np.ceil(diagonal))
-
-                                # Get the rotation matrix centered on the original image
-                                rotation_matrix = cv2.getRotationMatrix2D(
-                                    (num_cols / 2, num_rows / 2), rotation + 90, 1
-                                )
-
-                                # Adjust the matrix's translation component to center the image on the new, larger canvas
-                                tx = (square_size - num_cols) / 2
-                                ty = (square_size - num_rows) / 2
-                                rotation_matrix[0, 2] += tx
-                                rotation_matrix[1, 2] += ty
-
-                                # Warp the original image onto the new square canvas
-                                image_to_show = cv2.warpAffine(
-                                    image_cv,
-                                    rotation_matrix,
-                                    (square_size, square_size),
-                                )
-                            if debug:
-                                print(
-                                    f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
-                                )
+                            image_to_show, square_size = render_image(
+                                pic_buf, fullframe, rotation
+                            )
 
                             if battery_level is not None:
                                 draw_battery(
