@@ -237,7 +237,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         parts_dict: dict[int, int] = {}
 
         while True:
-            try:  # intentional 2-space indent — body stays at col 12 (hack to keep diff minimal)
+            try:
                 # read video stream
                 with trio.move_on_after(5.0) as cancel_scope:
                     reply = await conn.recv_video()
@@ -487,7 +487,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         elif key == ord("h"):
                             mouse_clicked[0] = True  # reuse toggle logic
 
-            except cv2.error as e:  # 2-space indent — matches the try above
+            except cv2.error as e:
                 # Any cv2 window call (imshow, getWindowProperty, resizeWindow,
                 # destroyWindow) can raise once the user destroys the window.
                 # If the helper confirms the main window is gone, exit cleanly;
