@@ -28,6 +28,20 @@ cv2.setNumThreads(1)
 debug = False
 
 
+def _is_window_closed(win_name: str) -> bool:
+    """Return True iff the OpenCV window has been destroyed by the user.
+
+    After destroy, getWindowImageRect raises on both Windows (NULL HWND)
+    and GTK (window removed from g_windows).  On macOS the close button
+    is disabled with WINDOW_GUI_NORMAL, so this path is unreachable.
+    """
+    try:
+        cv2.getWindowImageRect(win_name)
+    except cv2.error:
+        return True
+    return False
+
+
 class EndscopeConnection:
     def __init__(
         self, meta_channel: AsyncDatagramTransport, vid_channel: AsyncDatagramTransport
@@ -194,14 +208,16 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 help_thickness,
                 cv2.LINE_AA,
             )
-        help_win = "Help"
+        help_win_base = "Help"
+        help_win = help_win_base
+        help_win_counter = 0
         help_visible = False
 
         # Mouse callback: any click toggles help window
         mouse_clicked = [False]
 
         def on_mouse(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN:
+            if event == cv2.EVENT_LBUTTONUP:
                 mouse_clicked[0] = True
 
         cv2.setMouseCallback(win_name, on_mouse)
@@ -223,244 +239,279 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         parts_dict: dict[int, int] = {}
 
         while True:
-            # read video stream
-            with trio.move_on_after(5.0) as cancel_scope:
-                reply = await conn.recv_video()
+            try:
+                # read video stream
+                with trio.move_on_after(5.0) as cancel_scope:
+                    reply = await conn.recv_video()
 
-            if cancel_scope.cancelled_caught:
-                print("Video timeout")
-                break
+                if cancel_scope.cancelled_caught:
+                    print("Video timeout")
+                    break
 
-            raw_frame = reply[0]
-            frame_end: int = reply[1]
-            part = reply[2]
-            part_end: int = reply[3]
-            # misc_data = reply[4:8]
-            if not rotation_lock:
-                rotation = int.from_bytes(reply[4:6], "big")
-            pic_data = reply[8:]
+                raw_frame = reply[0]
+                frame_end: int = reply[1]
+                part = reply[2]
+                part_end: int = reply[3]
+                # misc_data = reply[4:8]
+                if not rotation_lock:
+                    rotation = int.from_bytes(reply[4:6], "big")
+                pic_data = reply[8:]
 
-            frame = absolute_frame_from_raw(raw_frame, frame)
+                frame = absolute_frame_from_raw(raw_frame, frame)
 
-            # store the part
-            if frame not in frames_dict:
-                frames_dict[frame] = {}
-            frames_dict[frame][part] = pic_data
+                # store the part
+                if frame not in frames_dict:
+                    frames_dict[frame] = {}
+                frames_dict[frame][part] = pic_data
 
-            if debug:
-                print(
-                    f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
-                )
+                if debug:
+                    print(
+                        f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
+                    )
 
-            # find number of parts required
-            if frame_end == 1:
-                parts_dict[frame] = part_end
+                # find number of parts required
+                if frame_end == 1:
+                    parts_dict[frame] = part_end
 
-            if frame in parts_dict:
-                num_parts = parts_dict[frame]
-                parts = frames_dict[frame]
-                if all(p in parts for p in range(num_parts)):
-                    pic_buf = b"".join(parts[i] for i in range(num_parts))
+                if frame in parts_dict:
+                    num_parts = parts_dict[frame]
+                    parts = frames_dict[frame]
+                    if all(p in parts for p in range(num_parts)):
+                        pic_buf = b"".join(parts[i] for i in range(num_parts))
 
-                    try:
-                        image = Image.open(BytesIO(pic_buf))
-                        image_np = np.array(image)
-                        image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-                        num_rows, num_cols = image_cv.shape[:2]
+                        try:
+                            image = Image.open(BytesIO(pic_buf))
+                            image_np = np.array(image)
+                            image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+                            num_rows, num_cols = image_cv.shape[:2]
 
-                        if not fullframe:
-                            # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
-                            square_size = min(num_rows, num_cols)
+                            if not fullframe:
+                                # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
+                                square_size = min(num_rows, num_cols)
 
-                            # Create a circular mask on the original image dimensions
-                            mask = np.zeros((num_rows, num_cols), np.uint8)
-                            cv2.circle(
-                                mask,
-                                (num_cols // 2, num_rows // 2),
-                                square_size // 2,
-                                255,
-                                -1,
+                                # Create a circular mask on the original image dimensions
+                                mask = np.zeros((num_rows, num_cols), np.uint8)
+                                cv2.circle(
+                                    mask,
+                                    (num_cols // 2, num_rows // 2),
+                                    square_size // 2,
+                                    255,
+                                    -1,
+                                )
+                                image_masked = cv2.bitwise_and(
+                                    image_cv, image_cv, mask=mask
+                                )
+
+                                # Get rotation matrix for the original image
+                                rotation_matrix = cv2.getRotationMatrix2D(
+                                    (num_cols / 2, num_rows / 2), rotation + 90, 1
+                                )
+                                # Rotate the masked image within its original frame
+                                image_rotated = cv2.warpAffine(
+                                    image_masked, rotation_matrix, (num_cols, num_rows)
+                                )
+
+                                # Crop the center square from the rotated image
+                                center_x, center_y = num_cols // 2, num_rows // 2
+                                half_size = square_size // 2
+                                image_to_show = image_rotated[
+                                    center_y - half_size : center_y + half_size,
+                                    center_x - half_size : center_x + half_size,
+                                ]
+
+                            else:
+                                # Case 2: Full frame, ensuring no corners are ever cropped.
+                                # The window will be a square with side length equal to the image diagonal.
+
+                                # Calculate the length of the image diagonal
+                                diagonal = np.sqrt(num_cols**2 + num_rows**2)
+
+                                # The new square size is the diagonal, rounded up to the nearest integer
+                                square_size = int(np.ceil(diagonal))
+
+                                # Get the rotation matrix centered on the original image
+                                rotation_matrix = cv2.getRotationMatrix2D(
+                                    (num_cols / 2, num_rows / 2), rotation + 90, 1
+                                )
+
+                                # Adjust the matrix's translation component to center the image on the new, larger canvas
+                                tx = (square_size - num_cols) / 2
+                                ty = (square_size - num_rows) / 2
+                                rotation_matrix[0, 2] += tx
+                                rotation_matrix[1, 2] += ty
+
+                                # Warp the original image onto the new square canvas
+                                image_to_show = cv2.warpAffine(
+                                    image_cv,
+                                    rotation_matrix,
+                                    (square_size, square_size),
+                                )
+                            if debug:
+                                print(
+                                    f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
+                                )
+
+                            if battery_level is not None:
+                                draw_battery(
+                                    image_to_show,
+                                    x=square_size // 100,
+                                    y=square_size // 100,
+                                    width=square_size // 10,
+                                    height=square_size // 20,
+                                    level=battery_level,
+                                    thickness=square_size // 200,
+                                )
+                            # Fit image_to_show into the current window size, preserving aspect ratio.
+                            # On macOS (WINDOW_GUI_NORMAL), the backend already preserves aspect ratio
+                            # on window resize, and getWindowImageRect always returns the native image
+                            # size — so this block is a no-op there.
+                            # On Windows, the backend stretches the image to fill the window, and
+                            # getWindowImageRect reflects the actual stretched display dimensions —
+                            # so we resize to fit the smaller dimension and pad the rest with black.
+                            # On Linux, at least Wayland, the backend also preserves aspect ratio, but
+                            # resizing is async so this block is better off skipped.
+                            if sys.platform == "win32":
+                                rect = cv2.getWindowImageRect(win_name)
+                                win_w, win_h = rect[2], rect[3]
+                                if win_w > 0 and win_h > 0:
+                                    fit = min(win_w, win_h)
+                                    if fit != square_size:
+                                        image_to_show = cv2.resize(
+                                            image_to_show,
+                                            (fit, fit),
+                                            interpolation=cv2.INTER_LINEAR,
+                                        )
+                                    if win_w != win_h:
+                                        # Pad the shorter axis with black to fill the window
+                                        pad_w = win_w - fit
+                                        pad_h = win_h - fit
+                                        image_to_show = cv2.copyMakeBorder(
+                                            image_to_show,
+                                            pad_h // 2,
+                                            pad_h - pad_h // 2,
+                                            pad_w // 2,
+                                            pad_w - pad_w // 2,
+                                            cv2.BORDER_CONSTANT,
+                                            value=(0, 0, 0),
+                                        )
+                            # Bail before imshow silently recreates a destroyed
+                            # window (GTK/Wayland backends don't raise on this).
+                            # Not race-safe.
+                            if _is_window_closed(win_name):
+                                print("window closed")
+                                break
+
+                            cv2.imshow(win_name, image_to_show)
+                            if firstframe:
+                                cv2.resizeWindow(win_name, square_size, square_size)
+                                firstframe = False
+
+                            # delete earlier frame AND current frame data since we processed it
+                            frames_dict = {
+                                f: frames_dict[f] for f in frames_dict if f > frame
+                            }
+                            parts_dict = {
+                                f: parts_dict[f] for f in parts_dict if f > frame
+                            }
+
+                            if trio.current_time() > keep_awake_time:
+                                keep_awake_time = trio.current_time() + 10
+                                prev_battery_level = battery_level
+                                battery_level = await conn.query_battery()
+                                if prev_battery_level != battery_level:
+                                    print(f"Battery level: {battery_level}")
+
+                        except OSError:
+                            print("image corrupted")
+
+                        # process UI events (e.g. window closing) and poll for a keypress
+                        # we do this only when a frame is completely evaluated to save CPU!
+                        key = cv2.pollKey() & 0xFF
+
+                        # Toggle help window on mouse click
+                        if mouse_clicked[0]:
+                            mouse_clicked[0] = False
+
+                            # Sync help_visible just-in-time in case user closed help via window chrome
+                            if help_visible and _is_window_closed(help_win):
+                                help_visible = False
+
+                            if help_visible:
+                                try:
+                                    cv2.destroyWindow(help_win)
+                                except cv2.error:
+                                    pass
+                                help_visible = False
+                            else:
+                                # Use a unique name for the help window to avoid issues when
+                                # closing the window natively on the GTK backend. If we quickly
+                                # relaunch, or query _is_window_closed, while the backend is
+                                # still asynchronously tearing down the window, we can segfault.
+                                help_win_counter += 1
+                                help_win = f"{help_win_base}_{help_win_counter}"
+                                cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
+                                cv2.setWindowTitle(help_win, "Help")
+                                cv2.imshow(help_win, help_img)
+                                cv2.setMouseCallback(help_win, on_mouse)
+                                help_visible = True
+
+                        if key == ord("1"):
+                            rotation_lock = True
+                            rotation = 0
+                        elif key == ord("2"):
+                            rotation_lock = True
+                            rotation = 90
+                        elif key == ord("3"):
+                            rotation_lock = True
+                            rotation = 180
+                        elif key == ord("4"):
+                            rotation_lock = True
+                            rotation = 270
+                        elif key == ord("r"):
+                            rotation_lock = False
+                        elif key == ord("q") or key == 27:
+                            print("user quit")
+                            break
+                        elif key == ord("w"):
+                            now = datetime.now()
+                            filename = (
+                                now.strftime("snapshot_%Y%m%d_%H%M%S_")
+                                + f"{now.microsecond // 10000:02d}.jpg"
                             )
-                            image_masked = cv2.bitwise_and(
-                                image_cv, image_cv, mask=mask
-                            )
+                            with open(filename, "wb") as fd:
+                                ret = fd.write(pic_buf)
+                            print(f"Wrote {ret} bytes to {filename}")
+                        elif key == ord("+"):
+                            if brightness < 100:
+                                brightness += 10
+                                print(
+                                    f"Brightness: {await conn.set_brightness(brightness)}"
+                                )
+                        elif key == ord("-"):
+                            if brightness > 0:
+                                brightness -= 10
+                                print(
+                                    f"Brightness: {await conn.set_brightness(brightness)}"
+                                )
+                        elif key == ord("f"):
+                            fullframe = not fullframe
+                        elif key == ord("d"):
+                            debug = not debug
+                        elif key == ord("h"):
+                            mouse_clicked[0] = True  # reuse toggle logic
 
-                            # Get rotation matrix for the original image
-                            rotation_matrix = cv2.getRotationMatrix2D(
-                                (num_cols / 2, num_rows / 2), rotation + 90, 1
-                            )
-                            # Rotate the masked image within its original frame
-                            image_rotated = cv2.warpAffine(
-                                image_masked, rotation_matrix, (num_cols, num_rows)
-                            )
-
-                            # Crop the center square from the rotated image
-                            center_x, center_y = num_cols // 2, num_rows // 2
-                            half_size = square_size // 2
-                            image_to_show = image_rotated[
-                                center_y - half_size : center_y + half_size,
-                                center_x - half_size : center_x + half_size,
-                            ]
-
-                        else:
-                            # Case 2: Full frame, ensuring no corners are ever cropped.
-                            # The window will be a square with side length equal to the image diagonal.
-
-                            # Calculate the length of the image diagonal
-                            diagonal = np.sqrt(num_cols**2 + num_rows**2)
-
-                            # The new square size is the diagonal, rounded up to the nearest integer
-                            square_size = int(np.ceil(diagonal))
-
-                            # Get the rotation matrix centered on the original image
-                            rotation_matrix = cv2.getRotationMatrix2D(
-                                (num_cols / 2, num_rows / 2), rotation + 90, 1
-                            )
-
-                            # Adjust the matrix's translation component to center the image on the new, larger canvas
-                            tx = (square_size - num_cols) / 2
-                            ty = (square_size - num_rows) / 2
-                            rotation_matrix[0, 2] += tx
-                            rotation_matrix[1, 2] += ty
-
-                            # Warp the original image onto the new square canvas
-                            image_to_show = cv2.warpAffine(
-                                image_cv, rotation_matrix, (square_size, square_size)
-                            )
-                        if debug:
-                            print(
-                                f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}"
-                            )
-
-                        if battery_level is not None:
-                            draw_battery(
-                                image_to_show,
-                                x=square_size // 100,
-                                y=square_size // 100,
-                                width=square_size // 10,
-                                height=square_size // 20,
-                                level=battery_level,
-                                thickness=square_size // 200,
-                            )
-                        # Fit image_to_show into the current window size, preserving aspect ratio.
-                        # On macOS (WINDOW_GUI_NORMAL), the backend already preserves aspect ratio
-                        # on window resize, and getWindowImageRect always returns the native image
-                        # size — so this block is a no-op there.
-                        # On Windows, the backend stretches the image to fill the window, and
-                        # getWindowImageRect reflects the actual stretched display dimensions —
-                        # so we resize to fit the smaller dimension and pad the rest with black.
-                        # On Linux, at least Wayland, the backend also preserves aspect ratio, but
-                        # resizing is async so this block is better off skipped.
-                        if sys.platform == "win32":
-                            rect = cv2.getWindowImageRect(win_name)
-                            win_w, win_h = rect[2], rect[3]
-                            if win_w > 0 and win_h > 0:
-                                fit = min(win_w, win_h)
-                                if fit != square_size:
-                                    image_to_show = cv2.resize(
-                                        image_to_show,
-                                        (fit, fit),
-                                        interpolation=cv2.INTER_LINEAR,
-                                    )
-                                if win_w != win_h:
-                                    # Pad the shorter axis with black to fill the window
-                                    pad_w = win_w - fit
-                                    pad_h = win_h - fit
-                                    image_to_show = cv2.copyMakeBorder(
-                                        image_to_show,
-                                        pad_h // 2,
-                                        pad_h - pad_h // 2,
-                                        pad_w // 2,
-                                        pad_w - pad_w // 2,
-                                        cv2.BORDER_CONSTANT,
-                                        value=(0, 0, 0),
-                                    )
-                        cv2.imshow(win_name, image_to_show)
-                        if firstframe:
-                            cv2.resizeWindow(win_name, square_size, square_size)
-                            firstframe = False
-
-                        # delete earlier frame AND current frame data since we processed it
-                        frames_dict = {
-                            f: frames_dict[f] for f in frames_dict if f > frame
-                        }
-                        parts_dict = {f: parts_dict[f] for f in parts_dict if f > frame}
-
-                        if trio.current_time() > keep_awake_time:
-                            keep_awake_time = trio.current_time() + 10
-                            prev_battery_level = battery_level
-                            battery_level = await conn.query_battery()
-                            if prev_battery_level != battery_level:
-                                print(f"Battery level: {battery_level}")
-
-                    except OSError:
-                        print("image corrupted")
-
-                    # process UI events (e.g. window closing) and poll for a keypress
-                    # we do this only when a frame is completely evaluated to save CPU!
-                    key = cv2.pollKey() & 0xFF
-
-                    # Toggle help window on mouse click
-                    if mouse_clicked[0]:
-                        mouse_clicked[0] = False
-                        if help_visible:
-                            cv2.destroyWindow(help_win)
-                            help_visible = False
-                        else:
-                            cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
-                            cv2.imshow(help_win, help_img)
-                            cv2.setMouseCallback(help_win, on_mouse)
-                            help_visible = True
-
-                    if key == ord("1"):
-                        rotation_lock = True
-                        rotation = 0
-                    elif key == ord("2"):
-                        rotation_lock = True
-                        rotation = 90
-                    elif key == ord("3"):
-                        rotation_lock = True
-                        rotation = 180
-                    elif key == ord("4"):
-                        rotation_lock = True
-                        rotation = 270
-                    elif key == ord("r"):
-                        rotation_lock = False
-                    elif (
-                        key == ord("q")
-                        or key == 27
-                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) == 0
-                        or cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
-                    ):
-                        print("window closed")
-                        break
-                    elif key == ord("w"):
-                        now = datetime.now()
-                        filename = (
-                            now.strftime("snapshot_%Y%m%d_%H%M%S_")
-                            + f"{now.microsecond // 10000:02d}.jpg"
-                        )
-                        with open(filename, "wb") as fd:
-                            ret = fd.write(pic_buf)
-                        print(f"Wrote {ret} bytes to {filename}")
-                    elif key == ord("+"):
-                        if brightness < 100:
-                            brightness += 10
-                            print(
-                                f"Brightness: {await conn.set_brightness(brightness)}"
-                            )
-                    elif key == ord("-"):
-                        if brightness > 0:
-                            brightness -= 10
-                            print(
-                                f"Brightness: {await conn.set_brightness(brightness)}"
-                            )
-                    elif key == ord("f"):
-                        fullframe = not fullframe
-                    elif key == ord("d"):
-                        debug = not debug
-                    elif key == ord("h"):
-                        mouse_clicked[0] = True  # reuse toggle logic
+            except cv2.error as e:
+                # Any cv2 window call (imshow, getWindowProperty, resizeWindow,
+                # destroyWindow) can raise once the user destroys the window.
+                # If the helper confirms the main window is gone, exit cleanly;
+                # otherwise re-raise so genuine bugs still surface.
+                # Print the error either way so an unrelated cv2.error that
+                # happens to coincide with a destroyed window is still visible.
+                print(f"cv2.error: {e}")
+                if _is_window_closed(win_name):
+                    print("window closed")
+                    break
+                raise
 
     finally:
         # stop stream and close
