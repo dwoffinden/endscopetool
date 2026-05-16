@@ -31,26 +31,14 @@ debug = False
 def _is_window_closed(win_name: str) -> bool:
     """Return True iff the OpenCV window has been destroyed by the user.
 
-    Uses two independent checks so either can be removed if the API
-    changes or a backend behaves differently.
+    After destroy, getWindowImageRect raises on both Windows (NULL HWND)
+    and GTK (window removed from g_windows).  On macOS the close button
+    is disabled with WINDOW_GUI_NORMAL, so this path is unreachable.
     """
-    # Raises on Windows after destroy (NULL HWND).
     try:
         cv2.getWindowImageRect(win_name)
     except cv2.error:
         return True
-
-    # Returns -1 on Linux/Wayland after destroy (in case no raise there).
-    try:
-        vis = cv2.getWindowProperty(
-            win_name,
-            cv2.WND_PROP_VISIBLE,
-        )
-    except cv2.error:
-        return True
-    if vis < 0:
-        return True
-
     return False
 
 
