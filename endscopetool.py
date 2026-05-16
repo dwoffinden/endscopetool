@@ -402,6 +402,13 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                                         cv2.BORDER_CONSTANT,
                                         value=(0, 0, 0),
                                     )
+                        # Bail before imshow silently recreates a destroyed
+                        # window (GTK/Wayland backends don't raise on this).
+                        # Not race-safe.
+                        if _is_window_closed(win_name):
+                            print("window closed")
+                            break
+
                         cv2.imshow(win_name, image_to_show)
                         if firstframe:
                             cv2.resizeWindow(win_name, square_size, square_size)
