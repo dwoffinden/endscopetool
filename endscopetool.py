@@ -31,15 +31,19 @@ debug = False
 def _is_window_closed(win_name: str) -> bool:
     """Return True iff the OpenCV window has been destroyed by the user.
 
-    After destroy, getWindowImageRect raises on both Windows (NULL HWND)
-    and GTK (window removed from g_windows).  On macOS the close button
-    is disabled with WINDOW_GUI_NORMAL, so this path is unreachable.
+    Detection is based on safe window properties to avoid backend crashes:
+    * macOS: uses WND_PROP_VISIBLE to avoid AUTOSIZE == -1 false positives.
+    * Windows: raises cv2.error after the window is destroyed.
+    * Linux/Wayland/GTK: uses WND_PROP_AUTOSIZE == -1 to avoid getWindowImageRect
+      assertions that crash the GTK backend.
     """
     try:
-        cv2.getWindowImageRect(win_name)
+        if sys.platform == "darwin":
+            return cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 0
+        else:
+            return cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
     except cv2.error:
         return True
-    return False
 
 
 class EndscopeConnection:
@@ -208,9 +212,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 help_thickness,
                 cv2.LINE_AA,
             )
-        help_win_base = "Help"
-        help_win = help_win_base
-        help_win_counter = 0
+        help_win = "Help"
         help_visible = False
 
         # Mouse callback: any click toggles help window
@@ -433,24 +435,14 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                             mouse_clicked[0] = False
 
                             # Sync help_visible just-in-time in case user closed help via window chrome
-                            if help_visible and _is_window_closed(help_win):
-                                help_visible = False
-
-                            if help_visible:
+                            if help_visible and not _is_window_closed(help_win):
                                 try:
                                     cv2.destroyWindow(help_win)
                                 except cv2.error:
                                     pass
                                 help_visible = False
                             else:
-                                # Use a unique name for the help window to avoid issues when
-                                # closing the window natively on the GTK backend. If we quickly
-                                # relaunch, or query _is_window_closed, while the backend is
-                                # still asynchronously tearing down the window, we can segfault.
-                                help_win_counter += 1
-                                help_win = f"{help_win_base}_{help_win_counter}"
                                 cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
-                                cv2.setWindowTitle(help_win, "Help")
                                 cv2.imshow(help_win, help_img)
                                 cv2.setMouseCallback(help_win, on_mouse)
                                 help_visible = True
