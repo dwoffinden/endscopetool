@@ -428,13 +428,14 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         # we do this only when a frame is completely evaluated to save CPU!
                         key = cv2.pollKey() & 0xFF
 
-                        # Sync help_visible in case user closed help via window chrome
-                        if help_visible and _is_window_closed(help_win):
-                            help_visible = False
-
                         # Toggle help window on mouse click
                         if mouse_clicked[0]:
                             mouse_clicked[0] = False
+
+                            # Sync help_visible just-in-time in case user closed help via window chrome
+                            if help_visible and _is_window_closed(help_win):
+                                help_visible = False
+
                             if help_visible:
                                 try:
                                     cv2.destroyWindow(help_win)
