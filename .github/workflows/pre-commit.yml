@@ -19,4 +19,5 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.nix', '**/flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
           gc-max-store-size-linux: 1G
+      - run: nix flake check
       - run: nix build
