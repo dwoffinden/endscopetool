@@ -38,11 +38,19 @@ def _is_window_closed(win_name: str) -> bool:
       assertions that crash the GTK backend.
     """
     try:
+        visible = cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE)
+        autosize = cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE)
+        if debug:
+            print(
+                f"_is_window_closed({win_name}): visible={visible}, autosize={autosize}"
+            )
         if sys.platform == "darwin":
-            return cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE) < 0
+            return visible < 0
         else:
-            return cv2.getWindowProperty(win_name, cv2.WND_PROP_AUTOSIZE) == -1
-    except cv2.error:
+            return autosize == -1
+    except cv2.error as e:
+        if debug:
+            print(f"_is_window_closed({win_name}): cv2.error: {e}")
         return True
 
 
@@ -441,9 +449,14 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         # Toggle help window on mouse click
                         if mouse_clicked[0]:
                             mouse_clicked[0] = False
+                            is_closed = _is_window_closed(help_win)
+                            if debug:
+                                print(
+                                    f"help toggled, was visible={help_visible}, closed={is_closed}"
+                                )
 
                             # Sync help_visible just-in-time in case user closed help via window chrome
-                            if help_visible and not _is_window_closed(help_win):
+                            if help_visible and not is_closed:
                                 try:
                                     cv2.destroyWindow(help_win)
                                 except cv2.error:
