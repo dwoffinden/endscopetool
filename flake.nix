@@ -122,7 +122,6 @@
             inherit (pre-commit-check) shellHook;
             buildInputs = pre-commit-check.enabledPackages;
             packages = [
-              pkgs.nixfmt-rfc-style
               pkgs.gtk3
               flint.packages.${system}.default
               (python.withPackages deps)
