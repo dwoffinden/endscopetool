@@ -74,7 +74,7 @@
           pre-commit-check = git-hooks.lib.${system}.run {
             src = ./.;
             hooks = {
-              nixfmt-rfc-style.enable = true;
+              nixfmt.enable = true;
               mypy = {
                 enable = true;
                 settings = {
