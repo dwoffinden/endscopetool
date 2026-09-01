@@ -92,6 +92,7 @@
                 name = "flint";
                 entry = "${flint.packages.${system}.default}/bin/flint --fail-if-multiple-versions";
                 files = "flake\\.(nix|lock)$";
+                pass_filenames = false;
               };
             };
           };
