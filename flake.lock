@@ -23,11 +23,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1783727699,
-        "narHash": "sha256-BOQsKIVekTCalqI7Io5LNd6O/2Xp0Tj8bqWQva2lEqU=",
+        "lastModified": 1787593025,
+        "narHash": "sha256-EWF7m/owKIFCafcx9CHOHFg1cmzNoqGHW4O44Fpgpd8=",
         "owner": "notashelf",
         "repo": "flint",
-        "rev": "56e8a7d257b671db1d83cc15e21e34e1e92c2b8a",
+        "rev": "f7068f0dd680a03a2e582e41f84edc209953bf6f",
         "type": "github"
       },
       "original": {
