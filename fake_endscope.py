@@ -1,3 +1,4 @@
+import logging
 import math
 import trio
 import cv2
@@ -6,6 +7,8 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import parse_qs
 from transports import MemoryDatagramTransport
+
+log = logging.getLogger("endscope.fake")
 
 
 class FakeEndscope:
@@ -37,7 +40,12 @@ class FakeEndscope:
             if reply_channel:
                 await reply_channel.send(reply)
         elif cmd_str.startswith("type=1002"):  # system info
-            reply = "type=2002&version=fake-v1.0\x0a".encode()
+            # modelled on a real reply
+            reply = (
+                "type=2002&protocol=2&w=640&h=480&fps=20&ratio=4:3&angle=270"
+                "&hardware=fake&company=fake&id=0&firmware=fake"
+                "&ssid=softish-fake&dn=fake&bl=30\x0a"
+            ).encode()
             if reply_channel:
                 await reply_channel.send(reply)
         elif cmd_str.startswith("type=1003"):  # brightness
@@ -53,10 +61,10 @@ class FakeEndscope:
             except (KeyError, IndexError, ValueError):
                 pass
         elif data == b"\x20\x36\x00\x02":  # start video
-            print("FAKE: Video Started")
+            log.debug("fake: video started")
             self.is_video_running = True
         elif data == b"\x20\x37":  # stop video
-            print("FAKE: Video Stopped")
+            log.debug("fake: video stopped")
             self.is_video_running = False
 
     async def run_meta_listener(self):
