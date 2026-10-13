@@ -634,6 +634,28 @@ async def main() -> None:
         action="store_true",
         help="Log every packet and per-frame timing (very verbose)",
     )
+    fake_group = parser.add_argument_group("fake device network simulation")
+    fake_group.add_argument(
+        "--fake-loss",
+        type=float,
+        default=0.0,
+        metavar="P",
+        help="Probability (0-1) of dropping each datagram, in each direction",
+    )
+    fake_group.add_argument(
+        "--fake-latency",
+        type=float,
+        default=0.0,
+        metavar="MS",
+        help="Delay each datagram by this many milliseconds",
+    )
+    fake_group.add_argument(
+        "--fake-jitter",
+        type=float,
+        default=0.0,
+        metavar="MS",
+        help="Add a random extra delay of up to this many milliseconds",
+    )
     args = parser.parse_args()
 
     buffer_size = 1500
@@ -651,7 +673,12 @@ async def main() -> None:
         if args.fake:
             from fake_endscope import start_fake_device
 
-            meta_chan, vid_chan = start_fake_device(nursery)
+            meta_chan, vid_chan = start_fake_device(
+                nursery,
+                loss=args.fake_loss,
+                latency=args.fake_latency / 1000,
+                jitter=args.fake_jitter / 1000,
+            )
 
             conn = EndscopeConnection(meta_chan, vid_chan)
 

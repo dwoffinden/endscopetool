@@ -1,5 +1,6 @@
 import logging
 import math
+import random
 import trio
 import cv2
 import numpy as np
@@ -9,6 +10,7 @@ from urllib.parse import parse_qs
 from transports import MemoryDatagramTransport
 
 log = logging.getLogger("endscope.fake")
+TRACE = 5  # matches endscopetool.TRACE
 
 
 class FakeEndscope:
@@ -163,33 +165,97 @@ async def run_fake_device(meta_receive, meta_send, vid_receive, vid_send):
     await device.run()
 
 
+# Roughly how many ~1300 byte datagrams fit in a default Linux UDP receive buffer.
+UDP_BUFFER_DATAGRAMS = 128
+
+
+class UdpLikeLink:
+    """One direction of a simulated UDP link.
+
+    Unlike a plain memory channel, sending never blocks: datagrams may be
+    dropped at random, delayed (and so reordered), or dropped because the
+    receiver isn't keeping up and its buffer is full.
+    """
+
+    def __init__(
+        self,
+        nursery: trio.Nursery,
+        name: str,
+        loss: float,
+        latency: float,
+        jitter: float,
+    ):
+        self.nursery = nursery
+        self.name = name
+        self.loss = loss
+        self.latency = latency
+        self.jitter = jitter
+        self.send_channel: trio.MemorySendChannel[bytes]
+        self.receive_channel: trio.MemoryReceiveChannel[bytes]
+        self.send_channel, self.receive_channel = trio.open_memory_channel(
+            UDP_BUFFER_DATAGRAMS
+        )
+
+    async def send(self, data: bytes) -> None:
+        if random.random() < self.loss:
+            log.log(TRACE, "fake: %s: dropped %d byte datagram", self.name, len(data))
+            return
+        delay = self.latency + random.uniform(0, self.jitter)
+        if delay > 0:
+            self.nursery.start_soon(self._deliver_later, data, delay)
+        else:
+            self._deliver(data)
+
+    async def _deliver_later(self, data: bytes, delay: float) -> None:
+        await trio.sleep(delay)
+        self._deliver(data)
+
+    def _deliver(self, data: bytes) -> None:
+        try:
+            self.send_channel.send_nowait(data)
+        except trio.WouldBlock:
+            log.debug("fake: %s: receive buffer full, dropped datagram", self.name)
+        except (trio.ClosedResourceError, trio.BrokenResourceError):
+            pass
+
+    async def aclose(self) -> None:
+        await self.send_channel.aclose()
+
+
 def start_fake_device(
     nursery: trio.Nursery,
+    loss: float = 0.0,
+    latency: float = 0.0,
+    jitter: float = 0.0,
 ) -> tuple[
     MemoryDatagramTransport,
     MemoryDatagramTransport,
 ]:
     """
-    Creates memory channels and starts the fake device task in the given nursery.
+    Creates simulated links and starts the fake device task in the given nursery.
     Returns the transports needed by the application (meta_transport, vid_transport).
+
+    loss is the probability of dropping each datagram, in each direction.
+    latency and jitter (seconds) delay each datagram by latency + U(0, jitter).
     """
-    meta_tx: trio.MemorySendChannel
-    meta_rx: trio.MemoryReceiveChannel
-    meta_reply_tx: trio.MemorySendChannel
-    meta_reply_rx: trio.MemoryReceiveChannel
-    vid_tx: trio.MemorySendChannel
-    vid_rx: trio.MemoryReceiveChannel
-    vid_back_tx: trio.MemorySendChannel
-    vid_back_rx: trio.MemoryReceiveChannel
 
-    meta_tx, meta_rx = trio.open_memory_channel(10)
-    meta_reply_tx, meta_reply_rx = trio.open_memory_channel(10)
-    vid_tx, vid_rx = trio.open_memory_channel(10)
-    vid_back_tx, vid_back_rx = trio.open_memory_channel(10)
+    def link(name: str) -> UdpLikeLink:
+        return UdpLikeLink(nursery, name, loss, latency, jitter)
 
-    nursery.start_soon(run_fake_device, meta_rx, meta_reply_tx, vid_back_rx, vid_tx)
+    meta_cmd = link("meta cmd")
+    meta_reply = link("meta reply")
+    vid_cmd = link("vid cmd")
+    vid_data = link("vid data")
 
-    meta_transport = MemoryDatagramTransport(meta_tx, meta_reply_rx)
-    vid_transport = MemoryDatagramTransport(vid_back_tx, vid_rx)
+    nursery.start_soon(
+        run_fake_device,
+        meta_cmd.receive_channel,
+        meta_reply,
+        vid_cmd.receive_channel,
+        vid_data,
+    )
+
+    meta_transport = MemoryDatagramTransport(meta_cmd, meta_reply.receive_channel)
+    vid_transport = MemoryDatagramTransport(vid_cmd, vid_data.receive_channel)
 
     return meta_transport, vid_transport

@@ -45,10 +45,16 @@ class UdpDatagramTransport:
             self.sock = None
 
 
+class AsyncSender(Protocol):
+    async def send(self, data: bytes, /) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
 class MemoryDatagramTransport:
     def __init__(
         self,
-        send_channel: trio.MemorySendChannel,
+        send_channel: AsyncSender,
         receive_channel: trio.MemoryReceiveChannel,
     ):
         self.send_channel = send_channel
