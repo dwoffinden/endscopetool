@@ -13,6 +13,7 @@
 # usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
 
 import cv2
+import logging
 import sys
 import numpy as np
 import trio
@@ -25,7 +26,28 @@ from transports import AsyncDatagramTransport, UdpDatagramTransport
 
 cv2.setNumThreads(1)
 
-debug = False
+TRACE = 5
+logging.addLevelName(TRACE, "TRACE")
+
+log = logging.getLogger("endscope")
+
+# Gaps between displayed frames longer than this are logged at DEBUG.
+STALL_THRESHOLD = 0.25
+
+
+class _Formatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        if record.levelno != logging.INFO:
+            msg = f"{record.levelname}: {msg}"
+        return f"{self.formatTime(record, '%H:%M:%S')}.{int(record.msecs):03d} {msg}"
+
+
+def setup_logging(level: int) -> None:
+    handler = logging.StreamHandler()
+    handler.setFormatter(_Formatter())
+    log.addHandler(handler)
+    log.setLevel(level)
 
 
 def _is_window_closed(win_name: str) -> bool:
@@ -60,19 +82,19 @@ class EndscopeConnection:
         data = f"type=1003&value={level}\x0a".encode()
         await self.meta.send(data)
         reply = await self.meta.recv()
-        if debug:
-            print(f"brightness response: {reply.hex(' ')}")
+        log.log(TRACE, "brightness response: %s", reply.hex(" "))
         try:
             params = parse_qs(reply.rstrip(b"\xaa").decode())
             return int(params["value"][0])
         except (KeyError, IndexError, ValueError):
+            log.warning("failed to parse brightness response: %r", reply)
             return None
 
-    async def get_system_info(self) -> str:
+    async def get_system_info(self) -> dict[str, str]:
         data: bytes = "type=1002\x0a".encode()
         await self.meta.send(data)
         reply = await self.meta.recv()
-        return reply.decode()
+        return parse_reply(reply)
 
     async def start_video(self) -> None:
         # three times according to captured traffic, but works fine sent once?
@@ -91,6 +113,21 @@ class EndscopeConnection:
         await self.vid.aclose()
 
 
+def parse_reply(reply: bytes) -> dict[str, str]:
+    """Parse a meta reply like b'type=2002&w=640&h=480\\n' into a dict.
+
+    The device pads some replies with trailing newlines and 0xaa bytes.
+    """
+    text = reply.rstrip(b"\xaa").decode(errors="replace")
+    return {k: v[0].strip() for k, v in parse_qs(text).items()}
+
+
+def describe_system_info(info: dict[str, str]) -> str:
+    """Summarise the interesting bits of a type=2002 system info reply."""
+    keys = ["company", "dn", "hardware", "firmware", "ssid", "w", "h", "fps"]
+    return ", ".join(f"{k}={info[k]}" for k in keys if k in info) or repr(info)
+
+
 def get_battery_level(query_string: str) -> float | None:
     """
     Extracts the battery level from a string like 'type=2001&data=23'.
@@ -100,8 +137,12 @@ def get_battery_level(query_string: str) -> float | None:
         params = parse_qs(query_string)
         return int(params["data"][0]) / 100
     except (KeyError, IndexError, ValueError):
-        print(f"failed to extract battery from data: ${query_string}")
+        log.warning("failed to extract battery from data: %r", query_string)
         return None
+
+
+def format_battery(level: float | None) -> str:
+    return "unknown" if level is None else f"{level:.0%}"
 
 
 def draw_battery(
@@ -220,8 +261,14 @@ def render_image(
             (square_size, square_size),
         )
 
-    if debug:
-        print(f"image {num_rows}x{num_cols}, using window {square_size}x{square_size}")
+    log.log(
+        TRACE,
+        "image %dx%d, using window %dx%d",
+        num_rows,
+        num_cols,
+        square_size,
+        square_size,
+    )
 
     return image_to_show, square_size
 
@@ -230,21 +277,19 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
     brightness = 100
     win_name = "Video Stream"
     firstframe = True
-    global debug
 
     try:
         # get system info
-        received_data = await conn.get_system_info()
-        print("Received data:", received_data)
+        log.info("Device: %s", describe_system_info(await conn.get_system_info()))
 
         battery_level: float | None = await conn.query_battery()
-        print(f"Battery level: {battery_level}")
+        log.info("Battery: %s", format_battery(battery_level))
 
         # three times according to captured traffic
         await conn.start_video()
 
         # set led brightness to 100%
-        print("Brightness: ", await conn.set_brightness(100))
+        log.info("Brightness: %s", await conn.set_brightness(100))
 
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
@@ -312,6 +357,9 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         frames_dict: dict[int, dict[int, bytes]] = {}
         # number of parts required per frame
         parts_dict: dict[int, int] = {}
+        # when the first part of each frame arrived, for timing logs
+        frame_start: dict[int, float] = {}
+        last_shown_time: float | None = None
 
         while True:
             try:
@@ -320,7 +368,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                     reply = await conn.recv_video()
 
                 if cancel_scope.cancelled_caught:
-                    print("Video timeout")
+                    log.warning("Video timeout")
                     break
 
                 raw_frame = reply[0]
@@ -337,12 +385,18 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 # store the part
                 if frame not in frames_dict:
                     frames_dict[frame] = {}
+                    frame_start[frame] = trio.current_time()
                 frames_dict[frame][part] = pic_data
 
-                if debug:
-                    print(
-                        f"raw_frame={raw_frame}, frame={frame}, frame_end={frame_end}, part={part}, part_end={part_end}"
-                    )
+                log.log(
+                    TRACE,
+                    "raw_frame=%d, frame=%d, frame_end=%d, part=%d, part_end=%d",
+                    raw_frame,
+                    frame,
+                    frame_end,
+                    part,
+                    part_end,
+                )
 
                 # find number of parts required
                 if frame_end == 1:
@@ -406,13 +460,40 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                             # window (GTK/Wayland backends don't raise on this).
                             # Not race-safe.
                             if _is_window_closed(win_name):
-                                print("window closed")
+                                log.info("window closed")
                                 break
 
                             cv2.imshow(win_name, image_to_show)
                             if firstframe:
                                 cv2.resizeWindow(win_name, square_size, square_size)
                                 firstframe = False
+
+                            shown_at = trio.current_time()
+                            if last_shown_time is not None:
+                                interval = shown_at - last_shown_time
+                                log.log(
+                                    TRACE,
+                                    "frame %d shown: %.0f ms since last, %.0f ms since first part",
+                                    frame,
+                                    interval * 1000,
+                                    (shown_at - frame_start[frame]) * 1000,
+                                )
+                                if interval > STALL_THRESHOLD:
+                                    log.debug(
+                                        "stall: %.0f ms since last frame",
+                                        interval * 1000,
+                                    )
+                            last_shown_time = shown_at
+
+                            for f in frames_dict:
+                                if f < frame:
+                                    expected = parts_dict.get(f)
+                                    log.debug(
+                                        "dropped incomplete frame %d: got parts %s of %s",
+                                        f,
+                                        sorted(frames_dict[f]),
+                                        expected if expected is not None else "?",
+                                    )
 
                             # delete earlier frame AND current frame data since we processed it
                             frames_dict = {
@@ -421,16 +502,21 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                             parts_dict = {
                                 f: parts_dict[f] for f in parts_dict if f > frame
                             }
+                            frame_start = {
+                                f: frame_start[f] for f in frame_start if f > frame
+                            }
 
                             if trio.current_time() > keep_awake_time:
                                 keep_awake_time = trio.current_time() + 10
                                 prev_battery_level = battery_level
                                 battery_level = await conn.query_battery()
                                 if prev_battery_level != battery_level:
-                                    print(f"Battery level: {battery_level}")
+                                    log.info(
+                                        "Battery: %s", format_battery(battery_level)
+                                    )
 
                         except OSError:
-                            print("image corrupted")
+                            log.debug("frame %d: failed to decode JPEG", frame)
 
                         # process UI events (e.g. window closing) and poll for a keypress
                         # we do this only when a frame is completely evaluated to save CPU!
@@ -478,7 +564,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         elif key == ord("r"):
                             rotation_lock = False
                         elif key == ord("q") or key == 27:
-                            print("user quit")
+                            log.info("user quit")
                             break
                         elif key == ord("w"):
                             now = datetime.now()
@@ -488,23 +574,30 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                             )
                             with open(filename, "wb") as fd:
                                 ret = fd.write(pic_buf)
-                            print(f"Wrote {ret} bytes to {filename}")
+                            log.info("Wrote %d bytes to %s", ret, filename)
                         elif key == ord("+"):
                             if brightness < 100:
                                 brightness += 10
-                                print(
-                                    f"Brightness: {await conn.set_brightness(brightness)}"
+                                log.info(
+                                    "Brightness: %s",
+                                    await conn.set_brightness(brightness),
                                 )
                         elif key == ord("-"):
                             if brightness > 0:
                                 brightness -= 10
-                                print(
-                                    f"Brightness: {await conn.set_brightness(brightness)}"
+                                log.info(
+                                    "Brightness: %s",
+                                    await conn.set_brightness(brightness),
                                 )
                         elif key == ord("f"):
                             fullframe = not fullframe
                         elif key == ord("d"):
-                            debug = not debug
+                            if log.isEnabledFor(logging.DEBUG):
+                                log.info("debug logging off")
+                                log.setLevel(logging.INFO)
+                            else:
+                                log.setLevel(logging.DEBUG)
+                                log.info("debug logging on")
                         elif key == ord("h"):
                             mouse_clicked[0] = True  # reuse toggle logic
 
@@ -515,9 +608,9 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 # otherwise re-raise so genuine bugs still surface.
                 # Print the error either way so an unrelated cv2.error that
                 # happens to coincide with a destroyed window is still visible.
-                print(f"cv2.error: {e}")
+                log.warning("cv2.error: %s", e)
                 if _is_window_closed(win_name):
-                    print("window closed")
+                    log.info("window closed")
                     break
                 raise
 
@@ -531,7 +624,16 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fake", action="store_true", help="Use fake endscope device")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Log timeouts, retries, dropped frames and stalls",
+    )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Log every packet and per-frame timing (very verbose)",
+    )
     args = parser.parse_args()
 
     buffer_size = 1500
@@ -541,8 +643,9 @@ async def main() -> None:
     target_port_vid = 61503
     source_port_vid = 51320
 
-    global debug
-    debug = args.debug
+    setup_logging(
+        TRACE if args.trace else logging.DEBUG if args.debug else logging.INFO
+    )
 
     async with trio.open_nursery() as nursery:
         if args.fake:
