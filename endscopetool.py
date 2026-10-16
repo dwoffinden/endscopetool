@@ -14,10 +14,12 @@
 
 import cv2
 import logging
+import math
 import sys
 import numpy as np
 import trio
 import argparse
+from dataclasses import dataclass
 from datetime import datetime
 from PIL import Image
 from io import BytesIO
@@ -273,24 +275,71 @@ def render_image(
     return image_to_show, square_size
 
 
-async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
+BATTERY_POLL_INTERVAL = 10.0
+
+
+@dataclass
+class DeviceState:
+    """Device state shared between the video loop and meta_task.
+
+    Trio runs everything on one thread, so no locking is needed.
+    """
+
+    battery_level: float | None = None
+
+
+async def initial_queries(conn: EndscopeConnection, state: DeviceState) -> None:
+    log.info("Device: %s", describe_system_info(await conn.get_system_info()))
+
+    state.battery_level = await conn.query_battery()
+    log.info("Battery: %s", format_battery(state.battery_level))
+
+    # set led brightness to 100%
+    log.info("Brightness: %s", await conn.set_brightness(100))
+
+
+async def meta_task(
+    conn: EndscopeConnection,
+    state: DeviceState,
+    brightness_rx: trio.MemoryReceiveChannel[int],
+) -> None:
+    """Handle all meta traffic, so the video loop never waits on the device.
+
+    Polls the battery periodically (which also keeps the device awake), and
+    applies brightness changes requested by the video loop.
+    """
+    next_poll = trio.current_time() + BATTERY_POLL_INTERVAL
+    while True:
+        level: int | None = None
+        with trio.move_on_at(next_poll):
+            level = await brightness_rx.receive()
+            # Several key presses may have queued up; only the latest matters.
+            while True:
+                try:
+                    level = brightness_rx.receive_nowait()
+                except trio.WouldBlock:
+                    break
+
+        if level is not None:
+            log.info("Brightness: %s", await conn.set_brightness(level))
+        else:
+            next_poll = trio.current_time() + BATTERY_POLL_INTERVAL
+            battery_level = await conn.query_battery()
+            if battery_level != state.battery_level:
+                state.battery_level = battery_level
+                log.info("Battery: %s", format_battery(battery_level))
+
+
+async def video_loop(
+    conn: EndscopeConnection,
+    state: DeviceState,
+    brightness_tx: trio.MemorySendChannel[int],
+) -> None:
     brightness = 100
     win_name = "Video Stream"
     firstframe = True
 
     try:
-        # get system info
-        log.info("Device: %s", describe_system_info(await conn.get_system_info()))
-
-        battery_level: float | None = await conn.query_battery()
-        log.info("Battery: %s", format_battery(battery_level))
-
-        # three times according to captured traffic
-        await conn.start_video()
-
-        # set led brightness to 100%
-        log.info("Brightness: %s", await conn.set_brightness(100))
-
         cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
         # Build help image once
@@ -350,7 +399,6 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
         frame = 0
         part = 0
         pic_buf = b""
-        keep_awake_time = trio.current_time()
 
         # Store received parts per frame
         # frame_number -> {part_number: pic_data}
@@ -413,6 +461,7 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                                 pic_buf, fullframe, rotation
                             )
 
+                            battery_level = state.battery_level
                             if battery_level is not None:
                                 draw_battery(
                                     image_to_show,
@@ -506,15 +555,6 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                                 f: frame_start[f] for f in frame_start if f > frame
                             }
 
-                            if trio.current_time() > keep_awake_time:
-                                keep_awake_time = trio.current_time() + 10
-                                prev_battery_level = battery_level
-                                battery_level = await conn.query_battery()
-                                if prev_battery_level != battery_level:
-                                    log.info(
-                                        "Battery: %s", format_battery(battery_level)
-                                    )
-
                         except OSError:
                             log.debug("frame %d: failed to decode JPEG", frame)
 
@@ -578,17 +618,11 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                         elif key == ord("+"):
                             if brightness < 100:
                                 brightness += 10
-                                log.info(
-                                    "Brightness: %s",
-                                    await conn.set_brightness(brightness),
-                                )
+                                brightness_tx.send_nowait(brightness)
                         elif key == ord("-"):
                             if brightness > 0:
                                 brightness -= 10
-                                log.info(
-                                    "Brightness: %s",
-                                    await conn.set_brightness(brightness),
-                                )
+                                brightness_tx.send_nowait(brightness)
                         elif key == ord("f"):
                             fullframe = not fullframe
                         elif key == ord("d"):
@@ -615,10 +649,25 @@ async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
                 raise
 
     finally:
+        cv2.destroyAllWindows()
+
+
+async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
+    state = DeviceState()
+    brightness_tx, brightness_rx = trio.open_memory_channel[int](math.inf)
+    try:
+        await conn.start_video()
+        await initial_queries(conn, state)
+
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(meta_task, conn, state, brightness_rx)
+            await video_loop(conn, state, brightness_tx)
+            # Cancel meta_task before closing the connection under it.
+            nursery.cancel_scope.cancel()
+    finally:
         # stop stream and close
         await conn.stop_video()
         await conn.aclose()
-        cv2.destroyAllWindows()
 
 
 async def main() -> None:
