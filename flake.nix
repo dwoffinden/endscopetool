@@ -3,10 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    git-hooks.url = "github:cachix/git-hooks.nix";
-    git-hooks.inputs.nixpkgs.follows = "nixpkgs";
-    flint.url = "github:notashelf/flint";
-    flint.inputs.nixpkgs.follows = "nixpkgs";
+    git-hooks = {
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    flint = {
+      url = "github:notashelf/flint";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -75,6 +79,7 @@
             src = ./.;
             hooks = {
               nixfmt.enable = true;
+              mdformat.enable = true;
               mypy = {
                 enable = true;
                 settings = {
