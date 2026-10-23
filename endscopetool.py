@@ -36,6 +36,10 @@ log = logging.getLogger("endscope")
 # Gaps between displayed frames longer than this are logged at DEBUG.
 STALL_THRESHOLD = 0.25
 
+# How long to wait for each meta reply, and how many times to send the command.
+META_TIMEOUT = 0.4
+META_ATTEMPTS = 3
+
 
 class _Formatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -73,35 +77,65 @@ class EndscopeConnection:
         self.meta = meta_channel
         self.vid = vid_channel
 
+    async def _request(
+        self, command: str, expect: dict[str, str], describe: str
+    ) -> dict[str, str] | None:
+        """Send a meta command and return its parsed reply, or None.
+
+        UDP may lose the command or the reply, so retry a few times. A reply
+        that turns up after we gave up waiting for it would otherwise be read
+        as the reply to the next command, so discard replies that don't
+        contain everything in expect.
+        """
+        for attempt in range(1, META_ATTEMPTS + 1):
+            await self.meta.send(command.encode())
+            with trio.move_on_after(META_TIMEOUT):
+                while True:
+                    raw = await self.meta.recv()
+                    reply = parse_reply(raw)
+                    if expect.items() <= reply.items():
+                        log.log(TRACE, "%s reply: %r", describe, raw)
+                        return reply
+                    log.debug("%s: discarding unexpected reply %r", describe, reply)
+            log.debug(
+                "%s: no reply after %.1fs (attempt %d/%d)",
+                describe,
+                META_TIMEOUT,
+                attempt,
+                META_ATTEMPTS,
+            )
+        log.warning("%s: no reply, giving up", describe)
+        return None
+
     async def query_battery(self) -> float | None:
-        data: bytes = "type=1001\x0a".encode()
-        await self.meta.send(data)
-        reply = await self.meta.recv()
-        received_data: str = reply.decode()
-        return get_battery_level(received_data)
+        reply = await self._request("type=1001\n", {"type": "2001"}, "battery")
+        return None if reply is None else get_battery_level(reply)
 
     async def set_brightness(self, level: int) -> int | None:
-        data = f"type=1003&value={level}\x0a".encode()
-        await self.meta.send(data)
-        reply = await self.meta.recv()
-        log.log(TRACE, "brightness response: %s", reply.hex(" "))
+        reply = await self._request(
+            f"type=1003&value={level}\n",
+            # A late reply to an earlier brightness change has the same type.
+            {"type": "1003", "value": str(level)},
+            "brightness",
+        )
+        if reply is None:
+            return None
         try:
-            params = parse_qs(reply.rstrip(b"\xaa").decode())
-            return int(params["value"][0])
-        except (KeyError, IndexError, ValueError):
-            log.warning("failed to parse brightness response: %r", reply)
+            return int(reply["value"])
+        except (KeyError, ValueError):
+            log.warning("failed to parse brightness reply: %r", reply)
             return None
 
-    async def get_system_info(self) -> dict[str, str]:
-        data: bytes = "type=1002\x0a".encode()
-        await self.meta.send(data)
-        reply = await self.meta.recv()
-        return parse_reply(reply)
+    async def get_system_info(self) -> dict[str, str] | None:
+        return await self._request("type=1002\n", {"type": "2002"}, "system info")
 
     async def start_video(self) -> None:
-        # three times according to captured traffic, but works fine sent once?
+        # Sent three times in the captured traffic. Once usually works, but
+        # repeating it covers a lost datagram.
         data = "\x20\x36\x00\x02".encode()
-        await self.vid.send(data)
+        for _ in range(3):
+            await self.vid.send(data)
+            await trio.sleep(0.05)
 
     async def stop_video(self) -> None:
         data = "\x20\x37".encode()
@@ -124,22 +158,23 @@ def parse_reply(reply: bytes) -> dict[str, str]:
     return {k: v[0].strip() for k, v in parse_qs(text).items()}
 
 
-def describe_system_info(info: dict[str, str]) -> str:
+def describe_system_info(info: dict[str, str] | None) -> str:
     """Summarise the interesting bits of a type=2002 system info reply."""
+    if info is None:
+        return "unknown"
     keys = ["company", "dn", "hardware", "firmware", "ssid", "w", "h", "fps"]
     return ", ".join(f"{k}={info[k]}" for k in keys if k in info) or repr(info)
 
 
-def get_battery_level(query_string: str) -> float | None:
+def get_battery_level(reply: dict[str, str]) -> float | None:
     """
-    Extracts the battery level from a string like 'type=2001&data=23'.
+    Extracts the battery level from a parsed reply like 'type=2001&data=23'.
     Returns an float in the range 0-1, or None if not found or invalid.
     """
     try:
-        params = parse_qs(query_string)
-        return int(params["data"][0]) / 100
-    except (KeyError, IndexError, ValueError):
-        log.warning("failed to extract battery from data: %r", query_string)
+        return int(reply["data"]) / 100
+    except (KeyError, ValueError):
+        log.warning("failed to extract battery from reply: %r", reply)
         return None
 
 
@@ -325,7 +360,8 @@ async def meta_task(
         else:
             next_poll = trio.current_time() + BATTERY_POLL_INTERVAL
             battery_level = await conn.query_battery()
-            if battery_level != state.battery_level:
+            # On failure keep showing the last known level.
+            if battery_level is not None and battery_level != state.battery_level:
                 state.battery_level = battery_level
                 log.info("Battery: %s", format_battery(battery_level))
 
