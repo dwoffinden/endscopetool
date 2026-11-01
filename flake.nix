@@ -101,6 +101,13 @@
               };
             };
           };
+
+          smoke-test = pkgs.runCommand "endscopetool-smoke-test" { } ''
+            ${self.packages.${system}.default}/bin/endscope \
+              --fake --headless --duration 0.5 --debug \
+              --fake-loss 0.02 --fake-latency 5 --fake-jitter 10
+            touch $out
+          '';
         }
       );
 

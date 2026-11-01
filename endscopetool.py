@@ -376,13 +376,18 @@ async def video_loop(
     conn: EndscopeConnection,
     state: DeviceState,
     brightness_tx: trio.MemorySendChannel[int],
-) -> None:
+    headless: bool = False,
+    duration: float | None = None,
+) -> int:
     brightness = 100
     win_name = "Video Stream"
     firstframe = True
+    frames_shown = 0
+    deadline = math.inf if duration is None else (trio.current_time() + duration)
 
     try:
-        cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
+        if not headless:
+            cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
         # Build help image once
         help_lines = [
@@ -431,7 +436,8 @@ async def video_loop(
             if event == cv2.EVENT_LBUTTONUP:
                 mouse_clicked[0] = True
 
-        cv2.setMouseCallback(win_name, on_mouse)
+        if not headless:
+            cv2.setMouseCallback(win_name, on_mouse)
 
         rotation_lock = False
         rotation = 0
@@ -456,6 +462,8 @@ async def video_loop(
         last_packet_time = trio.current_time()
 
         while True:
+            if trio.current_time() >= deadline:
+                break
             try:
                 # Process UI events (e.g. window closing) and poll for a
                 # keypress right after showing a frame (imshow needs it to
@@ -464,7 +472,7 @@ async def video_loop(
                 if frame_shown or trio.current_time() >= next_ui_poll:
                     frame_shown = False
                     next_ui_poll = trio.current_time() + UI_POLL_INTERVAL
-                    key = cv2.pollKey() & 0xFF
+                    key = -1 if headless else (cv2.pollKey() & 0xFF)
 
                     # Toggle help window on mouse click
                     if mouse_clicked[0]:
@@ -541,10 +549,12 @@ async def video_loop(
 
                 # read video stream, but come back in time for the next UI poll
                 reply = None
-                with trio.move_on_at(next_ui_poll):
+                with trio.move_on_at(min(next_ui_poll, deadline)):
                     reply = await conn.recv_video()
 
                 if reply is None:
+                    if trio.current_time() >= deadline:
+                        break
                     if trio.current_time() - last_packet_time > VIDEO_TIMEOUT:
                         log.warning("Video timeout")
                         break
@@ -613,42 +623,44 @@ async def video_loop(
                             # so we resize to fit the smaller dimension and pad the rest with black.
                             # On Linux, at least Wayland, the backend also preserves aspect ratio, but
                             # resizing is async so this block is better off skipped.
-                            if sys.platform == "win32":
-                                rect = cv2.getWindowImageRect(win_name)
-                                win_w, win_h = rect[2], rect[3]
-                                if win_w > 0 and win_h > 0:
-                                    fit = min(win_w, win_h)
-                                    if fit != square_size:
-                                        image_to_show = cv2.resize(
-                                            image_to_show,
-                                            (fit, fit),
-                                            interpolation=cv2.INTER_LINEAR,
-                                        )
-                                    if win_w != win_h:
-                                        # Pad the shorter axis with black to fill the window
-                                        pad_w = win_w - fit
-                                        pad_h = win_h - fit
-                                        image_to_show = cv2.copyMakeBorder(
-                                            image_to_show,
-                                            pad_h // 2,
-                                            pad_h - pad_h // 2,
-                                            pad_w // 2,
-                                            pad_w - pad_w // 2,
-                                            cv2.BORDER_CONSTANT,
-                                            value=(0, 0, 0),
-                                        )
-                            # Bail before imshow silently recreates a destroyed
-                            # window (GTK/Wayland backends don't raise on this).
-                            # Not race-safe.
-                            if _is_window_closed(win_name):
-                                log.info("window closed")
-                                break
+                            if not headless:
+                                if sys.platform == "win32":
+                                    rect = cv2.getWindowImageRect(win_name)
+                                    win_w, win_h = rect[2], rect[3]
+                                    if win_w > 0 and win_h > 0:
+                                        fit = min(win_w, win_h)
+                                        if fit != square_size:
+                                            image_to_show = cv2.resize(
+                                                image_to_show,
+                                                (fit, fit),
+                                                interpolation=cv2.INTER_LINEAR,
+                                            )
+                                        if win_w != win_h:
+                                            # Pad the shorter axis with black to fill the window
+                                            pad_w = win_w - fit
+                                            pad_h = win_h - fit
+                                            image_to_show = cv2.copyMakeBorder(
+                                                image_to_show,
+                                                pad_h // 2,
+                                                pad_h - pad_h // 2,
+                                                pad_w // 2,
+                                                pad_w - pad_w // 2,
+                                                cv2.BORDER_CONSTANT,
+                                                value=(0, 0, 0),
+                                            )
+                                # Bail before imshow silently recreates a destroyed
+                                # window (GTK/Wayland backends don't raise on this).
+                                # Not race-safe.
+                                if _is_window_closed(win_name):
+                                    log.info("window closed")
+                                    break
 
-                            cv2.imshow(win_name, image_to_show)
-                            if firstframe:
-                                cv2.resizeWindow(win_name, square_size, square_size)
-                                firstframe = False
-                            frame_shown = True
+                                cv2.imshow(win_name, image_to_show)
+                                if firstframe:
+                                    cv2.resizeWindow(win_name, square_size, square_size)
+                                    firstframe = False
+                                frame_shown = True
+                            frames_shown += 1
 
                             shown_at = trio.current_time()
                             if last_shown_time is not None:
@@ -699,36 +711,63 @@ async def video_loop(
                 # Print the error either way so an unrelated cv2.error that
                 # happens to coincide with a destroyed window is still visible.
                 log.warning("cv2.error: %s", e)
-                if _is_window_closed(win_name):
+                if not headless and _is_window_closed(win_name):
                     log.info("window closed")
                     break
                 raise
 
+        return frames_shown
     finally:
-        cv2.destroyAllWindows()
+        if not headless:
+            cv2.destroyAllWindows()
 
 
-async def run_app(conn: EndscopeConnection, buffer_size: int) -> None:
+async def run_app(
+    conn: EndscopeConnection,
+    buffer_size: int,
+    headless: bool = False,
+    duration: float | None = None,
+) -> int:
     state = DeviceState()
     brightness_tx, brightness_rx = trio.open_memory_channel[int](math.inf)
+    frames_shown = 0
     try:
         await conn.start_video()
         await initial_queries(conn, state)
 
         async with trio.open_nursery() as nursery:
             nursery.start_soon(meta_task, conn, state, brightness_rx)
-            await video_loop(conn, state, brightness_tx)
+            frames_shown = await video_loop(
+                conn,
+                state,
+                brightness_tx,
+                headless=headless,
+                duration=duration,
+            )
             # Cancel meta_task before closing the connection under it.
             nursery.cancel_scope.cancel()
     finally:
         # stop stream and close
         await conn.stop_video()
         await conn.aclose()
+    return frames_shown
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fake", action="store_true", help="Use fake endscope device")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without creating OpenCV windows",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Exit cleanly after SEC seconds",
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -774,6 +813,7 @@ async def main() -> None:
         TRACE if args.trace else logging.DEBUG if args.debug else logging.INFO
     )
 
+    frames_shown = 0
     async with trio.open_nursery() as nursery:
         if args.fake:
             from fake_endscope import start_fake_device
@@ -787,7 +827,9 @@ async def main() -> None:
 
             conn = EndscopeConnection(meta_chan, vid_chan)
 
-            await run_app(conn, buffer_size)
+            frames_shown = await run_app(
+                conn, buffer_size, headless=args.headless, duration=args.duration
+            )
             nursery.cancel_scope.cancel()
         else:
             async with (
@@ -799,7 +841,15 @@ async def main() -> None:
                 ) as vid_chan,
             ):
                 conn = EndscopeConnection(meta_chan, vid_chan)
-                await run_app(conn, buffer_size)
+                frames_shown = await run_app(
+                    conn, buffer_size, headless=args.headless, duration=args.duration
+                )
+
+    if args.headless:
+        log.debug("rendered %d frames", frames_shown)
+        if frames_shown == 0:
+            log.error("no frames were rendered")
+            sys.exit(1)
 
 
 def cli_main() -> None:
