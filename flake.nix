@@ -3,10 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
-    git-hooks.url = "github:cachix/git-hooks.nix";
-    git-hooks.inputs.nixpkgs.follows = "nixpkgs";
-    flint.url = "github:notashelf/flint";
-    flint.inputs.nixpkgs.follows = "nixpkgs";
+    git-hooks = {
+      url = "github:cachix/git-hooks.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    flint = {
+      url = "github:notashelf/flint";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -37,7 +41,7 @@
         {
           default = python.pkgs.buildPythonApplication {
             pname = "endscopetool";
-            version = "0.1.0";
+            version = "2";
             pyproject = true;
             src = ./.;
             nativeBuildInputs = [
@@ -75,6 +79,7 @@
             src = ./.;
             hooks = {
               nixfmt.enable = true;
+              mdformat.enable = true;
               mypy = {
                 enable = true;
                 settings = {
@@ -96,6 +101,13 @@
               };
             };
           };
+
+          smoke-test = pkgs.runCommand "endscopetool-smoke-test" { } ''
+            ${self.packages.${system}.default}/bin/endscope \
+              --fake --headless --duration 0.5 --debug \
+              --fake-loss 0.02 --fake-latency 5 --fake-jitter 10
+            touch $out
+          '';
         }
       );
 
