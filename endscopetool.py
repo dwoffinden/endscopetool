@@ -36,6 +36,12 @@ log = logging.getLogger("endscope")
 # Gaps between displayed frames longer than this are logged at DEBUG.
 STALL_THRESHOLD = 0.25
 
+# Poll for keys and window events at least this often.
+UI_POLL_INTERVAL = 0.05
+
+# Give up if no video arrives for this long.
+VIDEO_TIMEOUT = 5.0
+
 # How long to wait for each meta reply, and how many times to send the command.
 META_TIMEOUT = 0.4
 META_ATTEMPTS = 3
@@ -445,15 +451,105 @@ async def video_loop(
         frame_start: dict[int, float] = {}
         last_shown_time: float | None = None
 
+        frame_shown = False
+        next_ui_poll = trio.current_time()
+        last_packet_time = trio.current_time()
+
         while True:
             try:
-                # read video stream
-                with trio.move_on_after(5.0) as cancel_scope:
+                # Process UI events (e.g. window closing) and poll for a
+                # keypress right after showing a frame (imshow needs it to
+                # draw), and also on a timer, so the UI stays responsive even
+                # while frames are being dropped.
+                if frame_shown or trio.current_time() >= next_ui_poll:
+                    frame_shown = False
+                    next_ui_poll = trio.current_time() + UI_POLL_INTERVAL
+                    key = cv2.pollKey() & 0xFF
+
+                    # Toggle help window on mouse click
+                    if mouse_clicked[0]:
+                        mouse_clicked[0] = False
+
+                        # Sync help_visible just-in-time in case user closed help via window chrome
+                        if help_visible and _is_window_closed(help_win):
+                            help_visible = False
+
+                        if help_visible:
+                            try:
+                                cv2.destroyWindow(help_win)
+                            except cv2.error:
+                                pass
+                            help_visible = False
+                        else:
+                            # Use a unique name for the help window to avoid issues when
+                            # closing the window natively on the GTK backend. If we quickly
+                            # relaunch, or query _is_window_closed, while the backend is
+                            # still asynchronously tearing down the window, we can segfault.
+                            help_win_counter += 1
+                            help_win = f"{help_win_base}_{help_win_counter}"
+                            cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
+                            cv2.setWindowTitle(help_win, "Help")
+                            cv2.imshow(help_win, help_img)
+                            cv2.setMouseCallback(help_win, on_mouse)
+                            help_visible = True
+
+                    if key == ord("1"):
+                        rotation_lock = True
+                        rotation = 0
+                    elif key == ord("2"):
+                        rotation_lock = True
+                        rotation = 90
+                    elif key == ord("3"):
+                        rotation_lock = True
+                        rotation = 180
+                    elif key == ord("4"):
+                        rotation_lock = True
+                        rotation = 270
+                    elif key == ord("r"):
+                        rotation_lock = False
+                    elif key == ord("q") or key == 27:
+                        log.info("user quit")
+                        break
+                    elif key == ord("w") and pic_buf:
+                        now = datetime.now()
+                        filename = (
+                            now.strftime("snapshot_%Y%m%d_%H%M%S_")
+                            + f"{now.microsecond // 10000:02d}.jpg"
+                        )
+                        with open(filename, "wb") as fd:
+                            ret = fd.write(pic_buf)
+                        log.info("Wrote %d bytes to %s", ret, filename)
+                    elif key == ord("+"):
+                        if brightness < 100:
+                            brightness += 10
+                            brightness_tx.send_nowait(brightness)
+                    elif key == ord("-"):
+                        if brightness > 0:
+                            brightness -= 10
+                            brightness_tx.send_nowait(brightness)
+                    elif key == ord("f"):
+                        fullframe = not fullframe
+                    elif key == ord("d"):
+                        if log.isEnabledFor(logging.DEBUG):
+                            log.info("debug logging off")
+                            log.setLevel(logging.INFO)
+                        else:
+                            log.setLevel(logging.DEBUG)
+                            log.info("debug logging on")
+                    elif key == ord("h"):
+                        mouse_clicked[0] = True  # reuse toggle logic
+
+                # read video stream, but come back in time for the next UI poll
+                reply = None
+                with trio.move_on_at(next_ui_poll):
                     reply = await conn.recv_video()
 
-                if cancel_scope.cancelled_caught:
-                    log.warning("Video timeout")
-                    break
+                if reply is None:
+                    if trio.current_time() - last_packet_time > VIDEO_TIMEOUT:
+                        log.warning("Video timeout")
+                        break
+                    continue
+                last_packet_time = trio.current_time()
 
                 raw_frame = reply[0]
                 frame_end: int = reply[1]
@@ -552,6 +648,7 @@ async def video_loop(
                             if firstframe:
                                 cv2.resizeWindow(win_name, square_size, square_size)
                                 firstframe = False
+                            frame_shown = True
 
                             shown_at = trio.current_time()
                             if last_shown_time is not None:
@@ -593,83 +690,6 @@ async def video_loop(
 
                         except OSError:
                             log.debug("frame %d: failed to decode JPEG", frame)
-
-                        # process UI events (e.g. window closing) and poll for a keypress
-                        # we do this only when a frame is completely evaluated to save CPU!
-                        key = cv2.pollKey() & 0xFF
-
-                        # Toggle help window on mouse click
-                        if mouse_clicked[0]:
-                            mouse_clicked[0] = False
-
-                            # Sync help_visible just-in-time in case user closed help via window chrome
-                            if help_visible and _is_window_closed(help_win):
-                                help_visible = False
-
-                            if help_visible:
-                                try:
-                                    cv2.destroyWindow(help_win)
-                                except cv2.error:
-                                    pass
-                                help_visible = False
-                            else:
-                                # Use a unique name for the help window to avoid issues when
-                                # closing the window natively on the GTK backend. If we quickly
-                                # relaunch, or query _is_window_closed, while the backend is
-                                # still asynchronously tearing down the window, we can segfault.
-                                help_win_counter += 1
-                                help_win = f"{help_win_base}_{help_win_counter}"
-                                cv2.namedWindow(help_win, flags=cv2.WINDOW_GUI_NORMAL)
-                                cv2.setWindowTitle(help_win, "Help")
-                                cv2.imshow(help_win, help_img)
-                                cv2.setMouseCallback(help_win, on_mouse)
-                                help_visible = True
-
-                        if key == ord("1"):
-                            rotation_lock = True
-                            rotation = 0
-                        elif key == ord("2"):
-                            rotation_lock = True
-                            rotation = 90
-                        elif key == ord("3"):
-                            rotation_lock = True
-                            rotation = 180
-                        elif key == ord("4"):
-                            rotation_lock = True
-                            rotation = 270
-                        elif key == ord("r"):
-                            rotation_lock = False
-                        elif key == ord("q") or key == 27:
-                            log.info("user quit")
-                            break
-                        elif key == ord("w"):
-                            now = datetime.now()
-                            filename = (
-                                now.strftime("snapshot_%Y%m%d_%H%M%S_")
-                                + f"{now.microsecond // 10000:02d}.jpg"
-                            )
-                            with open(filename, "wb") as fd:
-                                ret = fd.write(pic_buf)
-                            log.info("Wrote %d bytes to %s", ret, filename)
-                        elif key == ord("+"):
-                            if brightness < 100:
-                                brightness += 10
-                                brightness_tx.send_nowait(brightness)
-                        elif key == ord("-"):
-                            if brightness > 0:
-                                brightness -= 10
-                                brightness_tx.send_nowait(brightness)
-                        elif key == ord("f"):
-                            fullframe = not fullframe
-                        elif key == ord("d"):
-                            if log.isEnabledFor(logging.DEBUG):
-                                log.info("debug logging off")
-                                log.setLevel(logging.INFO)
-                            else:
-                                log.setLevel(logging.DEBUG)
-                                log.info("debug logging on")
-                        elif key == ord("h"):
-                            mouse_clicked[0] = True  # reuse toggle logic
 
             except cv2.error as e:
                 # Any cv2 window call (imshow, getWindowProperty, resizeWindow,
