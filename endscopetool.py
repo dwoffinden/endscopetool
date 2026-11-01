@@ -6,11 +6,7 @@
 # Original version released at https://gist.github.com/RaphaelWimmer/5bcb286414e6cd38ed38724f9a6a6129
 # under CC0 / Public Domain (0) 2023 Raphael Wimmer.
 # Contributions by https://github.com/Aghei2 and https://gist.github.com/jamaggs.
-#
-# v0.1.0
-# reverse-engineered using a packet capture log - this means that I have no idea what all those magic numbers mean
-# and whether there are further features that might be supported by the hardware
-# usage: first connect to the 'softish-XXXX' wifi, then run this script. Check code for keyboard shortcuts.
+# See README.md for usage and keyboard shortcuts.
 
 import cv2
 import logging
