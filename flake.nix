@@ -41,7 +41,7 @@
         {
           default = python.pkgs.buildPythonApplication {
             pname = "endscopetool";
-            version = "1";
+            version = "2";
             pyproject = true;
             src = ./.;
             nativeBuildInputs = [

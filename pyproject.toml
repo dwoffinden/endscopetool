@@ -1,6 +1,6 @@
 [project]
 name = "endscopetool"
-version = "1"
+version = "2"
 description = "Python implementation of the endscopetool Android application"
 requires-python = ">=3.12"
 dependencies = [
