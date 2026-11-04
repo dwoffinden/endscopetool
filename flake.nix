@@ -30,6 +30,10 @@
         ps.pillow
         ps.trio
       ];
+      testDeps = ps: [
+        ps.pytest
+        ps.pytest-trio
+      ];
     in
     {
       packages = forEachSystem (
@@ -46,6 +50,10 @@
             src = ./.;
             nativeBuildInputs = [
               python.pkgs.setuptools
+            ];
+            nativeCheckInputs = [
+              python.pkgs.pytestCheckHook
+              python.pkgs.pytest-trio
             ];
             dependencies = deps python.pkgs;
             buildInputs = [ pkgs.gtk3 ];
@@ -68,6 +76,7 @@
           python-with-mypy = python.withPackages (
             ps:
             (deps ps)
+            ++ (testDeps ps)
             ++ [
               ps.mypy
               ps.types-pillow
@@ -137,7 +146,7 @@
             packages = [
               pkgs.gtk3
               flint.packages.${system}.default
-              (python.withPackages deps)
+              (python.withPackages (ps: (deps ps) ++ (testDeps ps)))
             ];
           };
         }
