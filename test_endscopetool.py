@@ -29,9 +29,12 @@ def test_frame_late_part_from_before_wrap() -> None:
 
 
 def test_parse_reply_strips_device_padding() -> None:
-    # The real device pads brightness replies with newlines and 0xaa.
+    # The real device sends uninitialised buffer bytes after the newline
+    # (often 0xaa, sometimes arbitrary bytes before the 0xaa padding).
     raw = b"type=1003&value=50\n\n" + b"\xaa" * 32
     assert parse_reply(raw) == {"type": "1003", "value": "50"}
+    raw_garbage = b"type=1003&value=100\n\x04!@" + b"\xaa" * 28
+    assert parse_reply(raw_garbage) == {"type": "1003", "value": "100"}
 
 
 def test_battery() -> None:

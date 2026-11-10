@@ -154,9 +154,11 @@ class EndscopeConnection:
 def parse_reply(reply: bytes) -> dict[str, str]:
     """Parse a meta reply like b'type=2002&w=640&h=480\\n' into a dict.
 
-    The device pads some replies with trailing newlines and 0xaa bytes.
+    The device sends a fixed-size buffer with trailing uninitialised bytes
+    (often 0xaa, sometimes arbitrary garbage) after the newline.
     """
-    text = reply.rstrip(b"\xaa").decode(errors="replace")
+    line = reply.split(b"\n", 1)[0].split(b"\x00", 1)[0]
+    text = line.decode(errors="replace")
     return {k: v[0].strip() for k, v in parse_qs(text).items()}
 
 
