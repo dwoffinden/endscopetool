@@ -1,7 +1,11 @@
 """Unit tests for the protocol helpers."""
 
+from io import BytesIO
+
+import numpy as np
 import pytest
 import trio
+from PIL import Image, ImageFile
 
 from endscopetool import (
     META_ATTEMPTS,
@@ -9,6 +13,7 @@ from endscopetool import (
     EndscopeConnection,
     FrameAssembler,
     absolute_frame_from_raw,
+    decode_jpeg,
     describe_system_info,
     get_battery_level,
     parse_reply,
@@ -191,3 +196,84 @@ def test_assembler_drops_incomplete_and_ignores_late_stragglers() -> None:
     # A late straggler for frame 0 must not resurrect frame 0 in asm.frames.
     assert asm.push(make_packet(0, 2, 3, b"a2"), now=1.07) is None
     assert asm.frames == {}
+
+
+def test_assembler_partial_uses_only_contiguous_prefix() -> None:
+    asm = FrameAssembler(min_completeness=0.6)
+    # Frame 0 has 5 parts; part 3 is lost while part 4 (frame_end=1) arrives.
+    # Only the contiguous prefix 0..2 (3/5 = 60%) is usable; part 4 must be
+    # excluded because baseline JPEG without restart markers is garbage past
+    # the first gap.
+    for p, data in ((0, b"p0"), (1, b"p1"), (2, b"p2"), (4, b"p4")):
+        assert asm.push(make_packet(0, p, 5, data), now=1.0) is None
+
+    # First packet of frame 1 flushes frame 0 as a partial frame.
+    out = asm.push(make_packet(1, 0, 5, b"next"), now=1.05)
+    assert out is not None
+    assert out.frame == 0
+    assert out.partial is True
+    assert out.data == b"p0p1p2"
+    assert out.prefix_parts == 3
+    assert out.expected_parts == 5
+    assert out.expected_known is True
+
+
+def test_assembler_partial_estimates_expected_when_tail_lost() -> None:
+    asm = FrameAssembler(min_completeness=0.75)
+    # Frame 0 completes with 8 parts so the assembler learns last_num_parts=8.
+    for p in range(7):
+        assert asm.push(make_packet(0, p, 8, f"{p}".encode()), now=1.0) is None
+    full = asm.push(make_packet(0, 7, 8, b"7"), now=1.01)
+    assert full is not None and not full.partial
+
+    # Frame 1 loses parts 6 and 7 (including frame_end=1), leaving 6/~8 = 75%.
+    for p in range(6):
+        assert asm.push(make_packet(1, p, 8, f"b{p}".encode()), now=1.05) is None
+    out = asm.push(make_packet(2, 0, 8, b"c0"), now=1.10)
+    assert out is not None
+    assert out.frame == 1
+    assert out.partial is True
+    assert out.prefix_parts == 6
+    assert out.expected_parts == 8
+    assert out.expected_known is False
+
+    # If frame 2 actually grew to 9 parts and lost part 8 (receiving 0..7 with
+    # frame_end=0), expected_parts must be at least max(parts) + 2 = 9, not 8.
+    for p in range(1, 8):
+        assert asm.push(make_packet(2, p, 9, f"c{p}".encode()), now=1.11) is None
+    out2 = asm.push(make_packet(3, 0, 9, b"d0"), now=1.15)
+    assert out2 is not None
+    assert out2.frame == 2
+    assert out2.partial is True
+    assert out2.prefix_parts == 8
+    assert out2.expected_parts == 9
+    assert out2.expected_known is False
+
+
+def test_decode_jpeg_composites_partial_onto_previous_frame() -> None:
+    rng = np.random.default_rng(123)
+    prev_bgr = np.full((480, 640, 3), (200, 50, 10), dtype=np.uint8)
+
+    # Encode a distinct noisy RGB image as baseline JPEG.
+    new_rgb = rng.integers(0, 255, (480, 640, 3), dtype=np.uint8)
+    buf = BytesIO()
+    Image.fromarray(new_rgb).save(buf, format="JPEG", quality=75)
+    full_jpeg = buf.getvalue()
+
+    full_bgr, full_rows = decode_jpeg(full_jpeg, partial=False)
+    assert full_rows == 480
+
+    # Truncate to 80% of the byte stream and composite onto prev_bgr.
+    truncated = full_jpeg[: int(len(full_jpeg) * 0.8)]
+    comp_bgr, valid_rows = decode_jpeg(truncated, partial=True, prev_image_cv=prev_bgr)
+    assert 200 < valid_rows < 480
+    # Intact top rows match the full decode pixel-for-pixel; bottom rows retain prev_bgr.
+    assert np.array_equal(comp_bgr[:valid_rows], full_bgr[:valid_rows])
+    assert np.array_equal(comp_bgr[valid_rows:], prev_bgr[valid_rows:])
+    assert ImageFile.LOAD_TRUNCATED_IMAGES is False
+
+
+def test_decode_jpeg_rejects_header_only_truncation() -> None:
+    with pytest.raises(OSError):
+        decode_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF", partial=True)
+    assert ImageFile.LOAD_TRUNCATED_IMAGES is False
