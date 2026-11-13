@@ -17,7 +17,7 @@ import trio
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
-from PIL import Image
+from PIL import Image, ImageFile
 from io import BytesIO
 from urllib.parse import parse_qs
 from transports import AsyncDatagramTransport, UdpDatagramTransport
@@ -41,6 +41,18 @@ VIDEO_TIMEOUT = 5.0
 # How long to wait for each meta reply, and how many times to send the command.
 META_TIMEOUT = 0.4
 META_ATTEMPTS = 3
+
+# Default completeness ratio when partial-frame decoding is enabled without a
+# specific value (via bare --min-completeness or the 'p' key).
+DEFAULT_PARTIAL_COMPLETENESS = 0.75
+
+# When libjpeg decodes a truncated JPEG (LOAD_TRUNCATED_IMAGES = True),
+# undecoded MCU rows are filled with neutral grey (128, 128, 128). The single
+# MCU row where truncation occurred has height <= 16 pixels (16 for 4:2:0,
+# 8 for 4:2:2), and 4:2:0 vertical chroma upsampling blends 1 pixel across the
+# MCU row boundary. Stepping back 17 rows from the last non-grey row leaves
+# only completely intact scanlines.
+TRUNCATED_ROW_MARGIN = 17
 
 
 class _Formatter(logging.Formatter):
@@ -233,13 +245,221 @@ def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
     return abs_frame
 
 
-def render_image(
-    pic_buf: bytes, fullframe: bool, rotation: int
+@dataclass
+class AssembledFrame:
+    frame: int
+    data: bytes
+    rotation: int
+    started_at: float
+    partial: bool = False
+    prefix_parts: int = 0
+    expected_parts: int = 0
+    expected_known: bool = True
+
+
+class FrameAssembler:
+    """Reassemble fragmented JPEG frames from 8-byte-header UDP datagrams.
+
+    Each datagram carries one slice of a baseline sequential JPEG (with no
+    restart markers). Complete frames are emitted as soon as all parts arrive.
+    When a newer frame starts arriving, any older buffered frames will never
+    receive more parts; if min_completeness < 1.0 and the newest such frame
+    has a contiguous prefix from part 0 meeting that ratio, its prefix is
+    emitted as a partial frame instead of being dropped.
+    """
+
+    def __init__(self, min_completeness: float = 1.0) -> None:
+        self.min_completeness = min_completeness
+        self.latest_frame = 0
+        self.last_finalized_frame = -1
+        self.last_num_parts: int | None = None
+        self.frames: dict[int, dict[int, bytes]] = {}
+        self.expected_parts: dict[int, int] = {}
+        self.frame_rotation: dict[int, int] = {}
+        self.frame_start: dict[int, float] = {}
+
+    def _discard(self, frame: int) -> None:
+        self.frames.pop(frame, None)
+        self.expected_parts.pop(frame, None)
+        self.frame_rotation.pop(frame, None)
+        self.frame_start.pop(frame, None)
+
+    def _log_dropped(self, frame: int) -> None:
+        expected = self.expected_parts.get(frame)
+        log.debug(
+            "dropped incomplete frame %d: got parts %s of %s",
+            frame,
+            sorted(self.frames[frame]),
+            expected if expected is not None else "?",
+        )
+
+    def _try_partial(self, frame: int) -> AssembledFrame | None:
+        parts = self.frames[frame]
+        prefix_len = 0
+        while prefix_len in parts:
+            prefix_len += 1
+        if prefix_len == 0:
+            return None
+
+        known_expected = self.expected_parts.get(frame)
+        if known_expected is not None:
+            expected = known_expected
+        elif self.last_num_parts is not None:
+            # Since frame_end=1 was not among `parts`, none of `parts` was the
+            # final part (num_parts - 1), so there were at least max(parts) + 2.
+            expected = max(self.last_num_parts, max(parts) + 2)
+        else:
+            return None
+
+        if prefix_len / expected < self.min_completeness:
+            return None
+
+        return AssembledFrame(
+            frame=frame,
+            data=b"".join(parts[i] for i in range(prefix_len)),
+            rotation=self.frame_rotation[frame],
+            started_at=self.frame_start[frame],
+            partial=True,
+            prefix_parts=prefix_len,
+            expected_parts=expected,
+            expected_known=known_expected is not None,
+        )
+
+    def push(self, packet: bytes, now: float) -> AssembledFrame | None:
+        if len(packet) <= 8:
+            return None
+
+        raw_frame = packet[0]
+        frame_end = packet[1]
+        part = packet[2]
+        part_end = packet[3]
+        rotation = int.from_bytes(packet[4:6], "big")
+        pic_data = packet[8:]
+
+        frame = absolute_frame_from_raw(raw_frame, self.latest_frame)
+        log.log(
+            TRACE,
+            "raw_frame=%d, frame=%d, frame_end=%d, part=%d, part_end=%d",
+            raw_frame,
+            frame,
+            frame_end,
+            part,
+            part_end,
+        )
+
+        if frame <= self.last_finalized_frame:
+            log.log(TRACE, "ignoring late part %d for finalized frame %d", part, frame)
+            return None
+
+        if frame > self.latest_frame:
+            self.latest_frame = frame
+
+        if frame not in self.frames:
+            self.frames[frame] = {}
+            self.frame_start[frame] = now
+        self.frames[frame][part] = pic_data
+        self.frame_rotation[frame] = rotation
+
+        if frame_end == 1 and part_end > 0:
+            self.expected_parts[frame] = part_end
+            self.last_num_parts = part_end
+
+        if frame in self.expected_parts:
+            num_parts = self.expected_parts[frame]
+            parts = self.frames[frame]
+            if all(p in parts for p in range(num_parts)):
+                assembled = AssembledFrame(
+                    frame=frame,
+                    data=b"".join(parts[i] for i in range(num_parts)),
+                    rotation=self.frame_rotation[frame],
+                    started_at=self.frame_start[frame],
+                    partial=False,
+                    prefix_parts=num_parts,
+                    expected_parts=num_parts,
+                    expected_known=True,
+                )
+                for f in sorted(k for k in self.frames if k < frame):
+                    self._log_dropped(f)
+                    self._discard(f)
+                self._discard(frame)
+                self.last_finalized_frame = frame
+                return assembled
+
+        older = sorted(f for f in self.frames if f < frame)
+        if not older:
+            return None
+
+        chosen: AssembledFrame | None = None
+        if self.min_completeness < 1.0:
+            for f in reversed(older):
+                chosen = self._try_partial(f)
+                if chosen is not None:
+                    break
+
+        for f in older:
+            if chosen is None or f != chosen.frame:
+                self._log_dropped(f)
+            self._discard(f)
+
+        self.last_finalized_frame = max(self.last_finalized_frame, frame - 1)
+        return chosen
+
+
+def decode_jpeg(
+    pic_buf: bytes,
+    partial: bool = False,
+    prev_image_cv: cv2.typing.MatLike | None = None,
 ) -> tuple[cv2.typing.MatLike, int]:
-    """Render the image buffer, applying mask, rotation, and cropping or padding."""
-    image = Image.open(BytesIO(pic_buf))
-    image_np = np.array(image)
+    """Decode a complete or truncated JPEG buffer into a BGR image.
+
+    Returns (image_cv, valid_rows). For a partial JPEG, composites the intact
+    top rows onto prev_image_cv (or black if there is no previous frame yet)
+    so neither the truncated MCU row nor libjpeg's grey fill is shown.
+    """
+    if partial:
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        try:
+            image = Image.open(BytesIO(pic_buf))
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+            image_np = np.array(image)
+        finally:
+            ImageFile.LOAD_TRUNCATED_IMAGES = False
+    else:
+        image = Image.open(BytesIO(pic_buf))
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        image_np = np.array(image)
+
     image_cv = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    num_rows = image_cv.shape[0]
+    if not partial:
+        return image_cv, num_rows
+
+    last_non_grey = -1
+    for r in range(num_rows - 1, -1, -1):
+        if np.any(image_np[r] != 128):
+            last_non_grey = r
+            break
+
+    valid_rows = max(0, last_non_grey - TRUNCATED_ROW_MARGIN)
+    if valid_rows == 0:
+        raise OSError("no complete scanlines in partial JPEG")
+
+    if prev_image_cv is not None and prev_image_cv.shape == image_cv.shape:
+        composited = prev_image_cv.copy()
+        composited[:valid_rows] = image_cv[:valid_rows]
+        image_cv = composited
+    else:
+        image_cv[valid_rows:] = 0
+
+    return image_cv, valid_rows
+
+
+def render_image(
+    image_cv: cv2.typing.MatLike, fullframe: bool, rotation: int
+) -> tuple[cv2.typing.MatLike, int]:
+    """Render a decoded BGR frame, applying mask, rotation, and cropping or padding."""
     num_rows, num_cols = image_cv.shape[:2]
 
     if not fullframe:
@@ -376,12 +596,16 @@ async def video_loop(
     brightness_tx: trio.MemorySendChannel[int],
     headless: bool = False,
     duration: float | None = None,
+    min_completeness: float = 1.0,
 ) -> int:
     brightness = 100
     win_name = "Video Stream"
     firstframe = True
     frames_shown = 0
     deadline = math.inf if duration is None else (trio.current_time() + duration)
+    partial_threshold = (
+        min_completeness if min_completeness < 1.0 else DEFAULT_PARTIAL_COMPLETENESS
+    )
 
     try:
         if not headless:
@@ -395,6 +619,7 @@ async def video_loop(
             "  r        Unlock rotation (use sensor)",
             "  +/-      Brightness up/down 10%",
             "  f        Toggle full frame / circle",
+            "  p        Toggle partial frames",
             "  w        Save snapshot (timestamped .jpg)",
             "  d        Toggle debug output",
             "  h        Toggle this help",
@@ -441,18 +666,10 @@ async def video_loop(
         rotation = 0
         fullframe = False
 
-        raw_frame = 0
-        frame = 0
-        part = 0
-        pic_buf = b""
-
-        # Store received parts per frame
-        # frame_number -> {part_number: pic_data}
-        frames_dict: dict[int, dict[int, bytes]] = {}
-        # number of parts required per frame
-        parts_dict: dict[int, int] = {}
-        # when the first part of each frame arrived, for timing logs
-        frame_start: dict[int, float] = {}
+        prev_image_cv: cv2.typing.MatLike | None = None
+        last_complete_buf = b""
+        last_frame_partial = False
+        assembler = FrameAssembler(min_completeness=min_completeness)
         last_shown_time: float | None = None
 
         frame_shown = False
@@ -516,15 +733,21 @@ async def video_loop(
                     elif key == ord("q") or key == 27:
                         log.info("user quit")
                         break
-                    elif key == ord("w") and pic_buf:
-                        now = datetime.now()
-                        filename = (
-                            now.strftime("snapshot_%Y%m%d_%H%M%S_")
-                            + f"{now.microsecond // 10000:02d}.jpg"
-                        )
-                        with open(filename, "wb") as fd:
-                            ret = fd.write(pic_buf)
-                        log.info("Wrote %d bytes to %s", ret, filename)
+                    elif key == ord("w") and prev_image_cv is not None:
+                        if last_frame_partial:
+                            ok, encoded = cv2.imencode(".jpg", prev_image_cv)
+                            snap_bytes = encoded.tobytes() if ok else b""
+                        else:
+                            snap_bytes = last_complete_buf
+                        if snap_bytes:
+                            now = datetime.now()
+                            filename = (
+                                now.strftime("snapshot_%Y%m%d_%H%M%S_")
+                                + f"{now.microsecond // 10000:02d}.jpg"
+                            )
+                            with open(filename, "wb") as fd:
+                                ret = fd.write(snap_bytes)
+                            log.info("Wrote %d bytes to %s", ret, filename)
                     elif key == ord("+"):
                         if brightness < 100:
                             brightness += 10
@@ -535,6 +758,16 @@ async def video_loop(
                             brightness_tx.send_nowait(brightness)
                     elif key == ord("f"):
                         fullframe = not fullframe
+                    elif key == ord("p"):
+                        if assembler.min_completeness < 1.0:
+                            assembler.min_completeness = 1.0
+                            log.info("partial frames off")
+                        else:
+                            assembler.min_completeness = partial_threshold
+                            log.info(
+                                "partial frames on (min completeness %.0f%%)",
+                                assembler.min_completeness * 100,
+                            )
                     elif key == ord("d"):
                         if log.isEnabledFor(logging.DEBUG):
                             log.info("debug logging off")
@@ -559,147 +792,125 @@ async def video_loop(
                     continue
                 last_packet_time = trio.current_time()
 
-                raw_frame = reply[0]
-                frame_end: int = reply[1]
-                part = reply[2]
-                part_end: int = reply[3]
-                # misc_data = reply[4:8]
+                assembled = assembler.push(reply, last_packet_time)
+                if assembled is None:
+                    continue
+
                 if not rotation_lock:
-                    rotation = int.from_bytes(reply[4:6], "big")
-                pic_data = reply[8:]
+                    rotation = assembled.rotation
 
-                frame = absolute_frame_from_raw(raw_frame, frame)
+                try:
+                    image_cv, valid_rows = decode_jpeg(
+                        assembled.data,
+                        partial=assembled.partial,
+                        prev_image_cv=prev_image_cv,
+                    )
+                    prev_image_cv = image_cv
+                    if not assembled.partial:
+                        last_complete_buf = assembled.data
+                    last_frame_partial = assembled.partial
 
-                # store the part
-                if frame not in frames_dict:
-                    frames_dict[frame] = {}
-                    frame_start[frame] = trio.current_time()
-                frames_dict[frame][part] = pic_data
+                    if assembled.partial:
+                        exp_str = (
+                            f"{assembled.expected_parts}"
+                            if assembled.expected_known
+                            else f"~{assembled.expected_parts}"
+                        )
+                        log.debug(
+                            "showing partial frame %d: prefix %d/%s parts, %d/%d rows",
+                            assembled.frame,
+                            assembled.prefix_parts,
+                            exp_str,
+                            valid_rows,
+                            image_cv.shape[0],
+                        )
 
-                log.log(
-                    TRACE,
-                    "raw_frame=%d, frame=%d, frame_end=%d, part=%d, part_end=%d",
-                    raw_frame,
-                    frame,
-                    frame_end,
-                    part,
-                    part_end,
-                )
+                    image_to_show, square_size = render_image(
+                        image_cv, fullframe, rotation
+                    )
 
-                # find number of parts required
-                if frame_end == 1:
-                    parts_dict[frame] = part_end
+                    battery_level = state.battery_level
+                    if battery_level is not None:
+                        draw_battery(
+                            image_to_show,
+                            x=square_size // 100,
+                            y=square_size // 100,
+                            width=square_size // 10,
+                            height=square_size // 20,
+                            level=battery_level,
+                            thickness=square_size // 200,
+                        )
+                    # Fit image_to_show into the current window size, preserving aspect ratio.
+                    # On macOS (WINDOW_GUI_NORMAL), the backend already preserves aspect ratio
+                    # on window resize, and getWindowImageRect always returns the native image
+                    # size — so this block is a no-op there.
+                    # On Windows, the backend stretches the image to fill the window, and
+                    # getWindowImageRect reflects the actual stretched display dimensions —
+                    # so we resize to fit the smaller dimension and pad the rest with black.
+                    # On Linux, at least Wayland, the backend also preserves aspect ratio, but
+                    # resizing is async so this block is better off skipped.
+                    if not headless:
+                        if sys.platform == "win32":
+                            rect = cv2.getWindowImageRect(win_name)
+                            win_w, win_h = rect[2], rect[3]
+                            if win_w > 0 and win_h > 0:
+                                fit = min(win_w, win_h)
+                                if fit != square_size:
+                                    image_to_show = cv2.resize(
+                                        image_to_show,
+                                        (fit, fit),
+                                        interpolation=cv2.INTER_LINEAR,
+                                    )
+                                if win_w != win_h:
+                                    # Pad the shorter axis with black to fill the window
+                                    pad_w = win_w - fit
+                                    pad_h = win_h - fit
+                                    image_to_show = cv2.copyMakeBorder(
+                                        image_to_show,
+                                        pad_h // 2,
+                                        pad_h - pad_h // 2,
+                                        pad_w // 2,
+                                        pad_w - pad_w // 2,
+                                        cv2.BORDER_CONSTANT,
+                                        value=(0, 0, 0),
+                                    )
+                        # Bail before imshow silently recreates a destroyed
+                        # window (GTK/Wayland backends don't raise on this).
+                        # Not race-safe.
+                        if _is_window_closed(win_name):
+                            log.info("window closed")
+                            break
 
-                if frame in parts_dict:
-                    num_parts = parts_dict[frame]
-                    parts = frames_dict[frame]
-                    if all(p in parts for p in range(num_parts)):
-                        pic_buf = b"".join(parts[i] for i in range(num_parts))
+                        cv2.imshow(win_name, image_to_show)
+                        if firstframe:
+                            cv2.resizeWindow(win_name, square_size, square_size)
+                            firstframe = False
+                        frame_shown = True
+                    frames_shown += 1
 
-                        try:
-                            image_to_show, square_size = render_image(
-                                pic_buf, fullframe, rotation
+                    shown_at = trio.current_time()
+                    if last_shown_time is not None:
+                        interval = shown_at - last_shown_time
+                        log.log(
+                            TRACE,
+                            "frame %d shown: %.0f ms since last, %.0f ms since first part",
+                            assembled.frame,
+                            interval * 1000,
+                            (shown_at - assembled.started_at) * 1000,
+                        )
+                        if interval > STALL_THRESHOLD:
+                            log.debug(
+                                "stall: %.0f ms since last frame",
+                                interval * 1000,
                             )
+                    last_shown_time = shown_at
 
-                            battery_level = state.battery_level
-                            if battery_level is not None:
-                                draw_battery(
-                                    image_to_show,
-                                    x=square_size // 100,
-                                    y=square_size // 100,
-                                    width=square_size // 10,
-                                    height=square_size // 20,
-                                    level=battery_level,
-                                    thickness=square_size // 200,
-                                )
-                            # Fit image_to_show into the current window size, preserving aspect ratio.
-                            # On macOS (WINDOW_GUI_NORMAL), the backend already preserves aspect ratio
-                            # on window resize, and getWindowImageRect always returns the native image
-                            # size — so this block is a no-op there.
-                            # On Windows, the backend stretches the image to fill the window, and
-                            # getWindowImageRect reflects the actual stretched display dimensions —
-                            # so we resize to fit the smaller dimension and pad the rest with black.
-                            # On Linux, at least Wayland, the backend also preserves aspect ratio, but
-                            # resizing is async so this block is better off skipped.
-                            if not headless:
-                                if sys.platform == "win32":
-                                    rect = cv2.getWindowImageRect(win_name)
-                                    win_w, win_h = rect[2], rect[3]
-                                    if win_w > 0 and win_h > 0:
-                                        fit = min(win_w, win_h)
-                                        if fit != square_size:
-                                            image_to_show = cv2.resize(
-                                                image_to_show,
-                                                (fit, fit),
-                                                interpolation=cv2.INTER_LINEAR,
-                                            )
-                                        if win_w != win_h:
-                                            # Pad the shorter axis with black to fill the window
-                                            pad_w = win_w - fit
-                                            pad_h = win_h - fit
-                                            image_to_show = cv2.copyMakeBorder(
-                                                image_to_show,
-                                                pad_h // 2,
-                                                pad_h - pad_h // 2,
-                                                pad_w // 2,
-                                                pad_w - pad_w // 2,
-                                                cv2.BORDER_CONSTANT,
-                                                value=(0, 0, 0),
-                                            )
-                                # Bail before imshow silently recreates a destroyed
-                                # window (GTK/Wayland backends don't raise on this).
-                                # Not race-safe.
-                                if _is_window_closed(win_name):
-                                    log.info("window closed")
-                                    break
-
-                                cv2.imshow(win_name, image_to_show)
-                                if firstframe:
-                                    cv2.resizeWindow(win_name, square_size, square_size)
-                                    firstframe = False
-                                frame_shown = True
-                            frames_shown += 1
-
-                            shown_at = trio.current_time()
-                            if last_shown_time is not None:
-                                interval = shown_at - last_shown_time
-                                log.log(
-                                    TRACE,
-                                    "frame %d shown: %.0f ms since last, %.0f ms since first part",
-                                    frame,
-                                    interval * 1000,
-                                    (shown_at - frame_start[frame]) * 1000,
-                                )
-                                if interval > STALL_THRESHOLD:
-                                    log.debug(
-                                        "stall: %.0f ms since last frame",
-                                        interval * 1000,
-                                    )
-                            last_shown_time = shown_at
-
-                            for f in frames_dict:
-                                if f < frame:
-                                    expected = parts_dict.get(f)
-                                    log.debug(
-                                        "dropped incomplete frame %d: got parts %s of %s",
-                                        f,
-                                        sorted(frames_dict[f]),
-                                        expected if expected is not None else "?",
-                                    )
-
-                            # delete earlier frame AND current frame data since we processed it
-                            frames_dict = {
-                                f: frames_dict[f] for f in frames_dict if f > frame
-                            }
-                            parts_dict = {
-                                f: parts_dict[f] for f in parts_dict if f > frame
-                            }
-                            frame_start = {
-                                f: frame_start[f] for f in frame_start if f > frame
-                            }
-
-                        except OSError:
-                            log.debug("frame %d: failed to decode JPEG", frame)
+                except OSError:
+                    log.debug(
+                        "%sframe %d: failed to decode JPEG",
+                        "partial " if assembled.partial else "",
+                        assembled.frame,
+                    )
 
             except cv2.error as e:
                 # Any cv2 window call (imshow, getWindowProperty, resizeWindow,
@@ -725,6 +936,7 @@ async def run_app(
     buffer_size: int,
     headless: bool = False,
     duration: float | None = None,
+    min_completeness: float = 1.0,
 ) -> int:
     state = DeviceState()
     brightness_tx, brightness_rx = trio.open_memory_channel[int](math.inf)
@@ -741,6 +953,7 @@ async def run_app(
                 brightness_tx,
                 headless=headless,
                 duration=duration,
+                min_completeness=min_completeness,
             )
             # Cancel meta_task before closing the connection under it.
             nursery.cancel_scope.cancel()
@@ -765,6 +978,18 @@ async def main() -> None:
         default=None,
         metavar="SEC",
         help="Exit cleanly after SEC seconds",
+    )
+    parser.add_argument(
+        "--min-completeness",
+        type=float,
+        nargs="?",
+        const=DEFAULT_PARTIAL_COMPLETENESS,
+        default=1.0,
+        metavar="RATIO",
+        help=(
+            "Render incomplete frames with a contiguous prefix of at least RATIO "
+            f"(0-1; {DEFAULT_PARTIAL_COMPLETENESS} if omitted, 1.0 to disable)"
+        ),
     )
     parser.add_argument(
         "--debug",
@@ -799,6 +1024,10 @@ async def main() -> None:
         help="Add a random extra delay of up to this many milliseconds",
     )
     args = parser.parse_args()
+    if not (0.0 < args.min_completeness <= 1.0):
+        parser.error(
+            "--min-completeness must be between 0 (exclusive) and 1 (inclusive)"
+        )
 
     buffer_size = 1500
     target_ip = "192.168.1.1"
@@ -826,7 +1055,11 @@ async def main() -> None:
             conn = EndscopeConnection(meta_chan, vid_chan)
 
             frames_shown = await run_app(
-                conn, buffer_size, headless=args.headless, duration=args.duration
+                conn,
+                buffer_size,
+                headless=args.headless,
+                duration=args.duration,
+                min_completeness=args.min_completeness,
             )
             nursery.cancel_scope.cancel()
         else:
@@ -840,7 +1073,11 @@ async def main() -> None:
             ):
                 conn = EndscopeConnection(meta_chan, vid_chan)
                 frames_shown = await run_app(
-                    conn, buffer_size, headless=args.headless, duration=args.duration
+                    conn,
+                    buffer_size,
+                    headless=args.headless,
+                    duration=args.duration,
+                    min_completeness=args.min_completeness,
                 )
 
     if args.headless:
