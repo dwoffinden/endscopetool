@@ -141,8 +141,8 @@ class FakeEndscope:
                 header[2] = i
                 header[3] = num_parts if i == num_parts - 1 else 0
 
-                # Rotation (4:6) - send current rotation
-                header[4:6] = self.rotation.to_bytes(2, "big")
+                # Rotation (4:6) - signed big-endian int16 sensor roll angle
+                header[4:6] = self.rotation.to_bytes(2, "big", signed=True)
 
                 payload = header + part_data
                 await self.vid_send.send(payload)

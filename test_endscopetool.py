@@ -17,6 +17,7 @@ from endscopetool import (
     describe_system_info,
     get_battery_level,
     parse_reply,
+    render_image,
 )
 
 
@@ -159,8 +160,31 @@ def make_packet(
     header[1] = 1 if is_last else 0
     header[2] = part
     header[3] = num_parts if is_last else 0
-    header[4:6] = rotation.to_bytes(2, "big")
+    header[4:6] = rotation.to_bytes(2, "big", signed=True)
     return bytes(header) + payload
+
+
+def test_assembler_parses_signed_sensor_angle() -> None:
+    asm = FrameAssembler()
+    out = asm.push(make_packet(0, 0, 1, b"ok", rotation=-45), now=1.0)
+    assert out is not None
+    assert out.rotation == -45
+
+
+def test_render_image_uses_mount_angle() -> None:
+    # Top half bright red, bottom half blue -> upright when (rotation == mount_angle).
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    img[:40, 40:60] = (0, 0, 255)
+    img[60:, 40:60] = (255, 0, 0)
+
+    # For a camera with mount_angle=90 and sensorAngle=90, net rotation is 0 deg.
+    rendered_90, _ = render_image(img, fullframe=False, rotation=90, mount_angle=90)
+    assert tuple(rendered_90[20, 50]) == (0, 0, 255)
+    assert tuple(rendered_90[80, 50]) == (255, 0, 0)
+
+    # Default mount_angle=270 with sensorAngle=270 also yields 0 deg net rotation.
+    rendered_270, _ = render_image(img, fullframe=False, rotation=270, mount_angle=270)
+    assert np.array_equal(rendered_90, rendered_270)
 
 
 def test_assembler_reorders_parts_and_wraps_past_255() -> None:

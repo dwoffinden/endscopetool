@@ -178,7 +178,7 @@ def describe_system_info(info: dict[str, str] | None) -> str:
     """Summarise the interesting bits of a type=2002 system info reply."""
     if info is None:
         return "unknown"
-    keys = ["company", "dn", "hardware", "firmware", "ssid", "w", "h", "fps"]
+    keys = ["company", "dn", "hardware", "firmware", "ssid", "w", "h", "fps", "angle"]
     return ", ".join(f"{k}={info[k]}" for k in keys if k in info) or repr(info)
 
 
@@ -333,7 +333,7 @@ class FrameAssembler:
         frame_end = packet[1]
         part = packet[2]
         part_end = packet[3]
-        rotation = int.from_bytes(packet[4:6], "big")
+        rotation = int.from_bytes(packet[4:6], "big", signed=True)
         pic_data = packet[8:]
 
         frame = absolute_frame_from_raw(raw_frame, self.latest_frame)
@@ -457,10 +457,18 @@ def decode_jpeg(
 
 
 def render_image(
-    image_cv: cv2.typing.MatLike, fullframe: bool, rotation: int
+    image_cv: cv2.typing.MatLike,
+    fullframe: bool,
+    rotation: int,
+    mount_angle: int = 270,
 ) -> tuple[cv2.typing.MatLike, int]:
-    """Render a decoded BGR frame, applying mask, rotation, and cropping or padding."""
+    """Render a decoded BGR frame, applying mask, rotation, and cropping or padding.
+
+    The official app rotates clockwise by (mount_angle - sensor_angle), which
+    corresponds to an OpenCV counter-clockwise rotation of (rotation - mount_angle).
+    """
     num_rows, num_cols = image_cv.shape[:2]
+    ccw_degrees = (rotation - mount_angle) % 360
 
     if not fullframe:
         # Case 1: Masked circle. The window will be a square of the SHORTER dimension.
@@ -479,7 +487,7 @@ def render_image(
 
         # Get rotation matrix for the original image
         rotation_matrix = cv2.getRotationMatrix2D(
-            (num_cols / 2, num_rows / 2), rotation + 90, 1
+            (num_cols / 2, num_rows / 2), ccw_degrees, 1
         )
         # Rotate the masked image within its original frame
         image_rotated = cv2.warpAffine(
@@ -506,7 +514,7 @@ def render_image(
 
         # Get the rotation matrix centered on the original image
         rotation_matrix = cv2.getRotationMatrix2D(
-            (num_cols / 2, num_rows / 2), rotation + 90, 1
+            (num_cols / 2, num_rows / 2), ccw_degrees, 1
         )
 
         # Adjust the matrix's translation component to center the image on the new, larger canvas
@@ -545,10 +553,17 @@ class DeviceState:
     """
 
     battery_level: float | None = None
+    mount_angle: int = 270
 
 
 async def initial_queries(conn: EndscopeConnection, state: DeviceState) -> None:
-    log.info("Device: %s", describe_system_info(await conn.get_system_info()))
+    info = await conn.get_system_info()
+    log.info("Device: %s", describe_system_info(info))
+    if info is not None and "angle" in info:
+        try:
+            state.mount_angle = int(info["angle"])
+        except ValueError:
+            log.warning("failed to parse mount angle from system info: %r", info)
 
     state.battery_level = await conn.query_battery()
     log.info("Battery: %s", format_battery(state.battery_level))
@@ -826,7 +841,7 @@ async def video_loop(
                         )
 
                     image_to_show, square_size = render_image(
-                        image_cv, fullframe, rotation
+                        image_cv, fullframe, rotation, state.mount_angle
                     )
 
                     battery_level = state.battery_level
