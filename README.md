@@ -76,6 +76,12 @@ nmcli connection modify softish-23840 \
   ipv6.method auto
 ```
 
+## Supported hardware & protocol
+
+`endscopetool` supports `softish-XXXX` cameras using `protocol=2` on UDP ports `61502` / `61503` (e.g. Vitcoco Y8). Note that the white-label `EndscopeTool` (`com.atomath.camera.neutral`) Android app also bundles a second protocol on UDP ports `61500` / `61501` for `"TX"` / JEGOAT chipsets, as well as a legacy `protocol=1` framing — see [PROTOCOL.md](PROTOCOL.md) for the wire format details.
+
+Looking for an open-source Android app instead of a desktop viewer? Check out [rbeilvert/otoscope](https://github.com/rbeilvert/otoscope), which supports several Wi-Fi otoscope families.
+
 ## Credits & License
 
 Licensed under [MPL-2.0](LICENSE).
