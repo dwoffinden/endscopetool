@@ -17,6 +17,7 @@ import trio
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from PIL import Image, ImageFile
 from io import BytesIO
 from urllib.parse import parse_qs
@@ -121,9 +122,9 @@ class EndscopeConnection:
         log.warning("%s: no reply, giving up", describe)
         return None
 
-    async def query_battery(self) -> float | None:
+    async def query_battery(self) -> "BatteryStatus | None":
         reply = await self._request("type=1001\n", {"type": "2001"}, "battery")
-        return None if reply is None else get_battery_level(reply)
+        return None if reply is None else parse_battery(reply)
 
     async def set_brightness(self, level: int) -> int | None:
         reply = await self._request(
@@ -178,24 +179,51 @@ def describe_system_info(info: dict[str, str] | None) -> str:
     """Summarise the interesting bits of a type=2002 system info reply."""
     if info is None:
         return "unknown"
-    keys = ["company", "dn", "hardware", "firmware", "ssid", "w", "h", "fps", "angle"]
+    keys = [
+        "company",
+        "dn",
+        "hardware",
+        "firmware",
+        "ssid",
+        "protocol",
+        "w",
+        "h",
+        "fps",
+        "angle",
+        "logo",
+    ]
     return ", ".join(f"{k}={info[k]}" for k in keys if k in info) or repr(info)
 
 
-def get_battery_level(reply: dict[str, str]) -> float | None:
-    """
-    Extracts the battery level from a parsed reply like 'type=2001&data=23'.
-    Returns an float in the range 0-1, or None if not found or invalid.
+type BatteryStatus = float | Literal["charging"]
+
+
+def parse_battery(reply: dict[str, str]) -> BatteryStatus | None:
+    """Parse a 'type=2001&data=...' battery reply.
+
+    Values 0..100 are charge percentages; values > 100 (101 in firmware)
+    indicate that the device is plugged in and charging (without reporting a
+    percentage).
     """
     try:
-        return int(reply["data"]) / 100
+        raw = int(reply["data"])
     except (KeyError, ValueError):
         log.warning("failed to extract battery from reply: %r", reply)
         return None
+    if raw < 0:
+        log.warning("negative battery value in reply: %r", reply)
+        return None
+    if raw > 100:
+        return "charging"
+    return raw / 100
 
 
-def format_battery(level: float | None) -> str:
-    return "unknown" if level is None else f"{level:.0%}"
+def format_battery(battery: BatteryStatus | None) -> str:
+    if battery is None:
+        return "unknown"
+    if battery == "charging":
+        return "charging"
+    return f"{battery:.0%}"
 
 
 def draw_battery(
@@ -204,24 +232,17 @@ def draw_battery(
     y: int,
     width: int,
     height: int,
-    level: float,
+    battery: BatteryStatus,
     thickness: int,
 ) -> None:
-    """
-    Draw a battery icon at (x, y) with given width, height and charge level (0 to 1).
-    """
-    # Clamp level to [0, 1]
-    level = max(0, min(level, 1.0))
-
-    # Colors
+    """Draw a battery icon (with charge bar or charging bolt) at (x, y)."""
     border_color = (255, 255, 255)
-    fill_color = (0, 255, 0) if level > 0.3 else (0, 0, 255)  # Red if low battery
 
     # Draw battery outline
     cv2.rectangle(img, (x, y), (x + width, y + height), border_color, thickness)
 
     # Draw battery tip
-    tip_width = int(width * 0.08)
+    tip_width = max(2, int(width * 0.08))
     tip_x = x + width
     tip_y = y + int(height * 0.3)
     tip_height = int(height * 0.4)
@@ -229,11 +250,33 @@ def draw_battery(
         img, (tip_x, tip_y), (tip_x + tip_width, tip_y + tip_height), border_color, -1
     )
 
-    # Fill battery level
-    fill_width = int((width - 4) * level)
-    cv2.rectangle(
-        img, (x + 2, y + 2), (x + 2 + fill_width, y + height - 2), fill_color, -1
-    )
+    if battery == "charging":
+        cv2.rectangle(
+            img, (x + 2, y + 2), (x + width - 2, y + height - 2), (180, 130, 0), -1
+        )
+        cx = x + width * 0.5
+        cy = y + height * 0.5
+        w = width * 0.36
+        h = height * 0.36
+        bolt = np.array(
+            [
+                [cx - w * 0.9, cy + h * 0.15],
+                [cx + w * 0.05, cy - h * 0.95],
+                [cx - w * 0.05, cy - h * 0.1],
+                [cx + w * 0.9, cy - h * 0.15],
+                [cx - w * 0.05, cy + h * 0.95],
+                [cx + w * 0.05, cy + h * 0.1],
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(img, [bolt], (0, 240, 255), lineType=cv2.LINE_AA)
+    else:
+        level = max(0.0, min(battery, 1.0))
+        fill_color = (0, 255, 0) if level > 0.3 else (0, 0, 255)
+        fill_width = int((width - 4) * level)
+        cv2.rectangle(
+            img, (x + 2, y + 2), (x + 2 + fill_width, y + height - 2), fill_color, -1
+        )
 
 
 def absolute_frame_from_raw(raw_frame: int, latest_abs_frame: int) -> int:
@@ -552,21 +595,22 @@ class DeviceState:
     Trio runs everything on one thread, so no locking is needed.
     """
 
-    battery_level: float | None = None
+    battery: BatteryStatus | None = None
     mount_angle: int = 270
 
 
 async def initial_queries(conn: EndscopeConnection, state: DeviceState) -> None:
     info = await conn.get_system_info()
     log.info("Device: %s", describe_system_info(info))
+    log.debug("System info fields: %r", info)
     if info is not None and "angle" in info:
         try:
             state.mount_angle = int(info["angle"])
         except ValueError:
             log.warning("failed to parse mount angle from system info: %r", info)
 
-    state.battery_level = await conn.query_battery()
-    log.info("Battery: %s", format_battery(state.battery_level))
+    state.battery = await conn.query_battery()
+    log.info("Battery: %s", format_battery(state.battery))
 
     # set led brightness to 100%
     log.info("Brightness: %s", await conn.set_brightness(100))
@@ -598,11 +642,11 @@ async def meta_task(
             log.info("Brightness: %s", await conn.set_brightness(level))
         else:
             next_poll = trio.current_time() + BATTERY_POLL_INTERVAL
-            battery_level = await conn.query_battery()
-            # On failure keep showing the last known level.
-            if battery_level is not None and battery_level != state.battery_level:
-                state.battery_level = battery_level
-                log.info("Battery: %s", format_battery(battery_level))
+            battery = await conn.query_battery()
+            # On failure keep showing the last known status.
+            if battery is not None and battery != state.battery:
+                state.battery = battery
+                log.info("Battery: %s", format_battery(battery))
 
 
 async def video_loop(
@@ -844,15 +888,15 @@ async def video_loop(
                         image_cv, fullframe, rotation, state.mount_angle
                     )
 
-                    battery_level = state.battery_level
-                    if battery_level is not None:
+                    battery = state.battery
+                    if battery is not None:
                         draw_battery(
                             image_to_show,
                             x=square_size // 100,
                             y=square_size // 100,
                             width=square_size // 10,
                             height=square_size // 20,
-                            level=battery_level,
+                            battery=battery,
                             thickness=square_size // 200,
                         )
                     # Fit image_to_show into the current window size, preserving aspect ratio.

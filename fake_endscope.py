@@ -13,6 +13,13 @@ log = logging.getLogger("endscope.fake")
 TRACE = 5  # matches endscopetool.TRACE
 
 
+# Simulated battery cycle: drain from 100% down to 5% over 65s, then report
+# charging (101) for 25s before repeating.
+FAKE_DRAIN_SECONDS = 65.0
+FAKE_CHARGE_SECONDS = 25.0
+FAKE_BATTERY_CYCLE = FAKE_DRAIN_SECONDS + FAKE_CHARGE_SECONDS
+
+
 class FakeEndscope:
     def __init__(
         self,
@@ -26,9 +33,15 @@ class FakeEndscope:
         self.vid_receive = vid_receive_channel
         self.vid_send = vid_send_channel
         self.brightness = 100
-        self.battery_level = 99
+        self.start_time = trio.current_time()
         self.rotation = 0
         self.is_video_running = False
+
+    def current_battery_data(self) -> int:
+        phase = (trio.current_time() - self.start_time) % FAKE_BATTERY_CYCLE
+        if phase < FAKE_DRAIN_SECONDS:
+            return max(5, round(100 - (phase / FAKE_DRAIN_SECONDS) * 95))
+        return 101  # > 100 signals charging in the camera protocol
 
     async def handle_command(self, data: bytes, reply_channel=None):
         cmd_str = ""
@@ -38,7 +51,7 @@ class FakeEndscope:
             pass
 
         if cmd_str.startswith("type=1001"):  # battery
-            reply = f"type=2001&data={self.battery_level}\x0a".encode()
+            reply = f"type=2001&data={self.current_battery_data()}\x0a".encode()
             if reply_channel:
                 await reply_channel.send(reply)
         elif cmd_str.startswith("type=1002"):  # system info

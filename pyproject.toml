@@ -18,3 +18,4 @@ py-modules = ["endscopetool", "fake_endscope", "transports"]
 
 [tool.pytest.ini_options]
 trio_mode = true
+testpaths = ["test_endscopetool.py"]

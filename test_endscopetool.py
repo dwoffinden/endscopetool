@@ -15,7 +15,9 @@ from endscopetool import (
     absolute_frame_from_raw,
     decode_jpeg,
     describe_system_info,
-    get_battery_level,
+    draw_battery,
+    format_battery,
+    parse_battery,
     parse_reply,
     render_image,
 )
@@ -46,12 +48,29 @@ def test_parse_reply_strips_device_padding() -> None:
 
 def test_battery() -> None:
     reply = parse_reply(b"type=2001&data=42\n")
-    assert get_battery_level(reply) == 0.42
+    status = parse_battery(reply)
+    assert status == 0.42
+    assert format_battery(status) == "42%"
+
+
+def test_battery_charging() -> None:
+    # Firmware sends data=101 (>100) when plugged in and charging.
+    reply = parse_reply(b"type=2001&data=101\n")
+    status = parse_battery(reply)
+    assert status == "charging"
+    assert format_battery(status) == "charging"
+
+    canvas = np.zeros((48, 80, 3), dtype=np.uint8)
+    draw_battery(canvas, x=4, y=4, width=48, height=24, battery=status, thickness=2)
+    # Charging icon draws bright yellow lightning bolt pixels (0, 240, 255) BGR.
+    assert np.any(np.all(canvas == (0, 240, 255), axis=2))
 
 
 def test_battery_garbage() -> None:
-    assert get_battery_level({"type": "2001", "data": "x"}) is None
-    assert get_battery_level({"type": "2001"}) is None
+    assert parse_battery({"type": "2001", "data": "x"}) is None
+    assert parse_battery({"type": "2001", "data": "-1"}) is None
+    assert parse_battery({"type": "2001"}) is None
+    assert format_battery(None) == "unknown"
 
 
 def test_describe_system_info() -> None:
@@ -301,3 +320,25 @@ def test_decode_jpeg_rejects_header_only_truncation() -> None:
     with pytest.raises(OSError):
         decode_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF", partial=True)
     assert ImageFile.LOAD_TRUNCATED_IMAGES is False
+
+
+async def test_fake_battery_drains_then_charges(
+    nursery: trio.Nursery, autojump_clock: trio.abc.Clock
+) -> None:
+    from fake_endscope import FAKE_DRAIN_SECONDS, start_fake_device
+
+    meta, vid = start_fake_device(nursery)
+    conn = EndscopeConnection(meta, vid)
+
+    initial = await conn.query_battery()
+    assert initial == 1.0
+
+    await trio.sleep(FAKE_DRAIN_SECONDS * 0.8)
+    low = await conn.query_battery()
+    assert isinstance(low, float) and low < 0.3
+
+    await trio.sleep(FAKE_DRAIN_SECONDS * 0.3)
+    charging = await conn.query_battery()
+    assert charging == "charging"
+
+    nursery.cancel_scope.cancel()
