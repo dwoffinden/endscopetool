@@ -653,6 +653,67 @@ async def meta_task(
                 log.info("Battery: %s", format_battery(battery))
 
 
+def build_help_image() -> cv2.typing.MatLike:
+    """Build the help overlay image with aligned key and description columns."""
+    header = "Keyboard shortcuts:"
+    shortcuts = [
+        ("1/2/3/4", "Lock rotation 0/90/180/270"),
+        ("r", "Unlock rotation (use sensor)"),
+        ("+/-", "Brightness up/down 10%"),
+        ("f", "Toggle full frame / circle"),
+        ("m", "Toggle horizontal mirror"),
+        ("p", "Toggle partial frames"),
+        ("w", "Save snapshot (timestamped .jpg)"),
+        ("d", "Toggle debug output"),
+        ("h", "Toggle this help"),
+        ("q / Esc", "Quit"),
+    ]
+    footer = "Click either window to toggle this help."
+
+    font = cv2.FONT_HERSHEY_DUPLEX
+    scale = 0.7
+    thickness = 1
+    padding = 24
+    line_h = 32
+    key_indent = 16
+    col_gap = 28
+
+    def text_w(s: str) -> int:
+        return cv2.getTextSize(s, font, scale, thickness)[0][0]
+
+    key_col_w = max(text_w(k) for k, _ in shortcuts)
+    desc_x = padding + key_indent + key_col_w + col_gap
+    max_desc_w = max(text_w(d) for _, d in shortcuts)
+    img_w = max(
+        desc_x + max_desc_w + padding,
+        text_w(header) + padding * 2,
+        text_w(footer) + padding * 2,
+    )
+    total_rows = 2 + len(shortcuts) + 2  # header, blank, shortcuts, blank, footer
+    img_h = line_h * total_rows + padding * 2
+
+    img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+    def put(text: str, x: int, row: int, color: tuple[int, int, int]) -> None:
+        cv2.putText(
+            img,
+            text,
+            (x, padding + 22 + row * line_h),
+            font,
+            scale,
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    put(header, padding, 0, (255, 255, 255))
+    for i, (key, desc) in enumerate(shortcuts, start=2):
+        put(key, padding + key_indent, i, (230, 230, 230))
+        put(desc, desc_x, i, (180, 180, 180))
+    put(footer, padding, 2 + len(shortcuts) + 1, (180, 180, 180))
+    return img
+
+
 async def video_loop(
     conn: EndscopeConnection,
     state: DeviceState,
@@ -675,43 +736,7 @@ async def video_loop(
         if not headless:
             cv2.namedWindow(win_name, flags=cv2.WINDOW_GUI_NORMAL)
 
-        # Build help image once
-        help_lines = [
-            "Keyboard shortcuts:",
-            "",
-            "  1/2/3/4  Lock rotation 0/90/180/270",
-            "  r        Unlock rotation (use sensor)",
-            "  +/-      Brightness up/down 10%",
-            "  f        Toggle full frame / circle",
-            "  m        Toggle horizontal mirror",
-            "  p        Toggle partial frames",
-            "  w        Save snapshot (timestamped .jpg)",
-            "  d        Toggle debug output",
-            "  h        Toggle this help",
-            "  q / Esc  Quit",
-            "",
-            "Click either window to toggle this help.",
-        ]
-        help_font = cv2.FONT_HERSHEY_DUPLEX
-        help_scale = 0.7
-        help_thickness = 1
-        help_padding = 20
-        help_line_h = 32
-        help_img_h = help_line_h * len(help_lines) + help_padding * 2
-        help_img_w = 560
-        help_img = np.zeros((help_img_h, help_img_w, 3), dtype=np.uint8)
-        for i, line in enumerate(help_lines):
-            color = (255, 255, 255) if i == 0 else (180, 180, 180)
-            cv2.putText(
-                help_img,
-                line,
-                (help_padding, help_padding + 20 + i * help_line_h),
-                help_font,
-                help_scale,
-                color,
-                help_thickness,
-                cv2.LINE_AA,
-            )
+        help_img = build_help_image()
         help_win_base = "Help"
         help_win = help_win_base
         help_win_counter = 0
