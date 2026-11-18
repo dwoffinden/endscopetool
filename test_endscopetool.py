@@ -206,6 +206,23 @@ def test_render_image_uses_mount_angle() -> None:
     assert np.array_equal(rendered_90, rendered_270)
 
 
+def test_render_image_mirrors_in_screen_space_after_rotation() -> None:
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    # Asymmetric L-shape: red near top, green on one side.
+    img[20:30, 45:55] = (0, 0, 255)
+    img[45:55, 20:30] = (0, 255, 0)
+
+    for fullframe in (False, True):
+        normal, _ = render_image(
+            img, fullframe=fullframe, rotation=300, mount_angle=270, mirror=False
+        )
+        mirrored, _ = render_image(
+            img, fullframe=fullframe, rotation=300, mount_angle=270, mirror=True
+        )
+        # Mirror flips left<->right on screen while preserving vertical gravity orientation.
+        assert np.array_equal(mirrored, normal[:, ::-1])
+
+
 def test_assembler_reorders_parts_and_wraps_past_255() -> None:
     asm = FrameAssembler()
     # Jump gradually up to frame 255, then wrap to 256 (raw 0).

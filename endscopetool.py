@@ -504,6 +504,7 @@ def render_image(
     fullframe: bool,
     rotation: int,
     mount_angle: int = 270,
+    mirror: bool = False,
 ) -> tuple[cv2.typing.MatLike, int]:
     """Render a decoded BGR frame, applying mask, rotation, and cropping or padding.
 
@@ -572,6 +573,9 @@ def render_image(
             rotation_matrix,
             (square_size, square_size),
         )
+
+    if mirror:
+        image_to_show = cv2.flip(image_to_show, 1)
 
     log.log(
         TRACE,
@@ -656,6 +660,7 @@ async def video_loop(
     headless: bool = False,
     duration: float | None = None,
     min_completeness: float = 1.0,
+    mirror: bool = False,
 ) -> int:
     brightness = 100
     win_name = "Video Stream"
@@ -678,6 +683,7 @@ async def video_loop(
             "  r        Unlock rotation (use sensor)",
             "  +/-      Brightness up/down 10%",
             "  f        Toggle full frame / circle",
+            "  m        Toggle horizontal mirror",
             "  p        Toggle partial frames",
             "  w        Save snapshot (timestamped .jpg)",
             "  d        Toggle debug output",
@@ -793,8 +799,12 @@ async def video_loop(
                         log.info("user quit")
                         break
                     elif key == ord("w") and prev_image_cv is not None:
-                        if last_frame_partial:
-                            ok, encoded = cv2.imencode(".jpg", prev_image_cv)
+                        if mirror or last_frame_partial:
+                            to_save = prev_image_cv
+                            if mirror:
+                                flip_axis = 0 if state.mount_angle % 180 != 0 else 1
+                                to_save = cv2.flip(to_save, flip_axis)
+                            ok, encoded = cv2.imencode(".jpg", to_save)
                             snap_bytes = encoded.tobytes() if ok else b""
                         else:
                             snap_bytes = last_complete_buf
@@ -817,6 +827,9 @@ async def video_loop(
                             brightness_tx.send_nowait(brightness)
                     elif key == ord("f"):
                         fullframe = not fullframe
+                    elif key == ord("m"):
+                        mirror = not mirror
+                        log.info("mirror %s", "on" if mirror else "off")
                     elif key == ord("p"):
                         if assembler.min_completeness < 1.0:
                             assembler.min_completeness = 1.0
@@ -885,7 +898,7 @@ async def video_loop(
                         )
 
                     image_to_show, square_size = render_image(
-                        image_cv, fullframe, rotation, state.mount_angle
+                        image_cv, fullframe, rotation, state.mount_angle, mirror=mirror
                     )
 
                     battery = state.battery
@@ -996,6 +1009,7 @@ async def run_app(
     headless: bool = False,
     duration: float | None = None,
     min_completeness: float = 1.0,
+    mirror: bool = False,
 ) -> int:
     state = DeviceState()
     brightness_tx, brightness_rx = trio.open_memory_channel[int](math.inf)
@@ -1013,6 +1027,7 @@ async def run_app(
                 headless=headless,
                 duration=duration,
                 min_completeness=min_completeness,
+                mirror=mirror,
             )
             # Cancel meta_task before closing the connection under it.
             nursery.cancel_scope.cancel()
@@ -1037,6 +1052,11 @@ async def main() -> None:
         default=None,
         metavar="SEC",
         help="Exit cleanly after SEC seconds",
+    )
+    parser.add_argument(
+        "--mirror",
+        action="store_true",
+        help="Start with horizontal mirroring enabled (left/right ear mode; 'm' key)",
     )
     parser.add_argument(
         "--min-completeness",
@@ -1119,6 +1139,7 @@ async def main() -> None:
                 headless=args.headless,
                 duration=args.duration,
                 min_completeness=args.min_completeness,
+                mirror=args.mirror,
             )
             nursery.cancel_scope.cancel()
         else:
@@ -1137,6 +1158,7 @@ async def main() -> None:
                     headless=args.headless,
                     duration=args.duration,
                     min_completeness=args.min_completeness,
+                    mirror=args.mirror,
                 )
 
     if args.headless:
