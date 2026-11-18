@@ -23,6 +23,7 @@ Click either window (or press `h`) to toggle the on-screen help overlay.
 | `r` | Unlock rotation (use camera's gravity sensor) |
 | `+` / `-` | Increase / decrease LED brightness by 10% |
 | `f` | Toggle full frame / circular crop |
+| `m` | Toggle horizontal mirror (left / right ear) |
 | `p` | Toggle partial-frame decoding |
 | `w` | Save a snapshot (`snapshot_YYYYMMDD_HHMMSS_CC.jpg`) |
 | `d` | Toggle debug logging |
@@ -33,6 +34,7 @@ Click either window (or press `h`) to toggle the on-screen help overlay.
 
 - `--debug`: log timeouts, retries, dropped incomplete frames, and frame stalls.
 - `--trace`: log every UDP packet header and per-frame timing.
+- `--mirror`: start with horizontal mirroring enabled.
 - `--min-completeness [RATIO]`: render incomplete frames whose contiguous prefix from part 0 is at least `RATIO` of the frame (`0`–`1`, `0.75` if given without a value), compositing the decoded top rows over the previous frame.
 - `--fake`: run against a built-in simulated camera instead of real hardware.
   - `--fake-loss P`: drop each datagram with probability `P` (`0`–`1`) in each direction.
@@ -75,6 +77,12 @@ nmcli connection modify softish-23840 \
   ipv4.routing-rules "" \
   ipv6.method auto
 ```
+
+## Supported hardware & protocol
+
+`endscopetool` supports `softish-XXXX` cameras using `protocol=2` on UDP ports `61502` / `61503` (e.g. Vitcoco Y8). Note that the white-label `EndscopeTool` (`com.atomath.camera.neutral`) Android app also bundles a second protocol on UDP ports `61500` / `61501` for `"TX"` / JEGOAT chipsets, as well as a legacy `protocol=1` framing — see [PROTOCOL.md](PROTOCOL.md) for the wire format details.
+
+Looking for an open-source Android app instead of a desktop viewer? Check out [rbeilvert/otoscope](https://github.com/rbeilvert/otoscope), which supports several Wi-Fi otoscope families.
 
 ## Credits & License
 

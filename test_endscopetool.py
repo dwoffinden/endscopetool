@@ -15,8 +15,11 @@ from endscopetool import (
     absolute_frame_from_raw,
     decode_jpeg,
     describe_system_info,
-    get_battery_level,
+    draw_battery,
+    format_battery,
+    parse_battery,
     parse_reply,
+    render_image,
 )
 
 
@@ -45,12 +48,29 @@ def test_parse_reply_strips_device_padding() -> None:
 
 def test_battery() -> None:
     reply = parse_reply(b"type=2001&data=42\n")
-    assert get_battery_level(reply) == 0.42
+    status = parse_battery(reply)
+    assert status == 0.42
+    assert format_battery(status) == "42%"
+
+
+def test_battery_charging() -> None:
+    # Firmware sends data=101 (>100) when plugged in and charging.
+    reply = parse_reply(b"type=2001&data=101\n")
+    status = parse_battery(reply)
+    assert status == "charging"
+    assert format_battery(status) == "charging"
+
+    canvas = np.zeros((48, 80, 3), dtype=np.uint8)
+    draw_battery(canvas, x=4, y=4, width=48, height=24, battery=status, thickness=2)
+    # Charging icon draws bright yellow lightning bolt pixels (0, 240, 255) BGR.
+    assert np.any(np.all(canvas == (0, 240, 255), axis=2))
 
 
 def test_battery_garbage() -> None:
-    assert get_battery_level({"type": "2001", "data": "x"}) is None
-    assert get_battery_level({"type": "2001"}) is None
+    assert parse_battery({"type": "2001", "data": "x"}) is None
+    assert parse_battery({"type": "2001", "data": "-1"}) is None
+    assert parse_battery({"type": "2001"}) is None
+    assert format_battery(None) == "unknown"
 
 
 def test_describe_system_info() -> None:
@@ -159,8 +179,48 @@ def make_packet(
     header[1] = 1 if is_last else 0
     header[2] = part
     header[3] = num_parts if is_last else 0
-    header[4:6] = rotation.to_bytes(2, "big")
+    header[4:6] = rotation.to_bytes(2, "big", signed=True)
     return bytes(header) + payload
+
+
+def test_assembler_parses_signed_sensor_angle() -> None:
+    asm = FrameAssembler()
+    out = asm.push(make_packet(0, 0, 1, b"ok", rotation=-45), now=1.0)
+    assert out is not None
+    assert out.rotation == -45
+
+
+def test_render_image_uses_mount_angle() -> None:
+    # Top half bright red, bottom half blue -> upright when (rotation == mount_angle).
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    img[:40, 40:60] = (0, 0, 255)
+    img[60:, 40:60] = (255, 0, 0)
+
+    # For a camera with mount_angle=90 and sensorAngle=90, net rotation is 0 deg.
+    rendered_90, _ = render_image(img, fullframe=False, rotation=90, mount_angle=90)
+    assert tuple(rendered_90[20, 50]) == (0, 0, 255)
+    assert tuple(rendered_90[80, 50]) == (255, 0, 0)
+
+    # Default mount_angle=270 with sensorAngle=270 also yields 0 deg net rotation.
+    rendered_270, _ = render_image(img, fullframe=False, rotation=270, mount_angle=270)
+    assert np.array_equal(rendered_90, rendered_270)
+
+
+def test_render_image_mirrors_in_screen_space_after_rotation() -> None:
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    # Asymmetric L-shape: red near top, green on one side.
+    img[20:30, 45:55] = (0, 0, 255)
+    img[45:55, 20:30] = (0, 255, 0)
+
+    for fullframe in (False, True):
+        normal, _ = render_image(
+            img, fullframe=fullframe, rotation=300, mount_angle=270, mirror=False
+        )
+        mirrored, _ = render_image(
+            img, fullframe=fullframe, rotation=300, mount_angle=270, mirror=True
+        )
+        # Mirror flips left<->right on screen while preserving vertical gravity orientation.
+        assert np.array_equal(mirrored, normal[:, ::-1])
 
 
 def test_assembler_reorders_parts_and_wraps_past_255() -> None:
@@ -277,3 +337,25 @@ def test_decode_jpeg_rejects_header_only_truncation() -> None:
     with pytest.raises(OSError):
         decode_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF", partial=True)
     assert ImageFile.LOAD_TRUNCATED_IMAGES is False
+
+
+async def test_fake_battery_drains_then_charges(
+    nursery: trio.Nursery, autojump_clock: trio.abc.Clock
+) -> None:
+    from fake_endscope import FAKE_DRAIN_SECONDS, start_fake_device
+
+    meta, vid = start_fake_device(nursery)
+    conn = EndscopeConnection(meta, vid)
+
+    initial = await conn.query_battery()
+    assert initial == 1.0
+
+    await trio.sleep(FAKE_DRAIN_SECONDS * 0.8)
+    low = await conn.query_battery()
+    assert isinstance(low, float) and low < 0.3
+
+    await trio.sleep(FAKE_DRAIN_SECONDS * 0.3)
+    charging = await conn.query_battery()
+    assert charging == "charging"
+
+    nursery.cancel_scope.cancel()
